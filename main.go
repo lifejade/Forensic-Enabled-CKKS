@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"math"
+	"math/big"
 	"math/cmplx"
+	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"tifs/src/crt"
 	"tifs/src/galois"
@@ -12,6 +17,7 @@ import (
 	"github.com/tuneinsight/lattigo/v5/core/rlwe"
 	"github.com/tuneinsight/lattigo/v5/he/hefloat"
 	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
 	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
 
@@ -125,12 +131,16 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	}
 	Q0Q1level := perLevel * 2
 
+	// ######## step 1. b0 + b1 * skAuth ######
 	ringqp.MulCoeffsMontgomery(b1, skAuth.Value, b1)
 	ringqp.Add(b0, b1, b0)
 	ringqp.Reduce(b0, b0)
 	ringqp.IMForm(b0, b0)
+	// ##########################################
 
+	// ######## step 2. ModDown ######
 	N := params.N()
+	// Q_ : Q0Q1, P_ : Q2...Qdnum P
 	Q_ := params.Q()
 	P_ := Q_[Q0Q1level:]
 	for _, v := range params.P() {
@@ -142,9 +152,10 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	ringP_, _ := ring.NewRing(N, P_)
 	be := crt.NewBasisExtender(ringQ_, ringP_)
 
+	//polQ_ : b0 mod Q0Q1, polP_ : b0 mod P
 	polQ_ := ringQ_.NewPoly()
-	polres := ringQ_.NewPoly()
 	polP_ := ringP_.NewPoly()
+	polres := ringQ_.NewPoly()
 	for i, v := range b0.Q.Coeffs[:Q0Q1level] {
 		copy(polQ_.Coeffs[i], v)
 	}
@@ -157,10 +168,11 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	be.ModDownQPtoQNTT(polQ_.Level(), polP_.Level(), polQ_, polP_, polres)
 
 	polskAuth := ringQ_.NewPoly()
-	for i, v := range skAuth.Value.Q.Coeffs[:4] {
+	for i, v := range skAuth.Value.Q.Coeffs[:Q0Q1level] {
 		copy(polskAuth.Coeffs[i], v)
 	}
 
+	// ######## step 3. compute Q1[Q0hat]^-1 + Q0[Q1hat]^-1 * skAuth ######
 	Q := params.Q()
 	blockA := make([]int, perLevel)
 	blockB := make([]int, perLevel)
@@ -169,8 +181,9 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 		blockB[i] = i + perLevel
 	}
 
-	t1, _ := crt.ComputeValue(Q, blockA, blockB)
+	// t0 = Q1[Q0hat]^-1, t1 = Q0[Q1hat]^-1
 	t0, _ := crt.ComputeValue(Q, blockB, blockA)
+	t1, _ := crt.ComputeValue(Q, blockA, blockB)
 
 	ringQ_.MulScalarBigint(polskAuth, t1, polskAuth)
 	ringQ_.IMForm(polskAuth, polskAuth)
@@ -178,6 +191,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	ringQ_.MForm(polskAuth, polskAuth)
 	ringQ_.Reduce(polskAuth, polskAuth)
 
+	// ######## step 4. compute inverse of Q1[Q0hat]^-1 + Q0[Q1hat]^-1 * skAuth ######
 	coef := make([]uint64, len(ringQ_.ModuliChain()))
 	for j := range N {
 		for i := range polskAuth.Coeffs {
@@ -191,6 +205,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	ringQ_.MulCoeffsMontgomery(polskAuth, polres, polres)
 	ringQ_.INTT(polres, polres)
 
+	// ######## step 5. ModUp(make poly to Secret Key Object) ######
 	polresP := ringP_.NewPoly()
 	be.ModUpQtoP(ringQ_.Level(), ringP_.Level(), polres, polresP)
 
@@ -217,11 +232,16 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 func main() {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	// Moduli 생성 관련은 moduli_test.go에 따로 분리
+	modulipath := "moduli.txt"
+	Q, P := LoadModuliFromTXT(modulipath)
+
 	//ckks parameter init
 	SchemeParams := hefloat.ParametersLiteral{
 		LogN:            16,
-		LogQ:            []int{48, 40, 40, 40, 40, 40, 40, 40, 40, 40},
-		LogP:            []int{48, 48},
+		Q:               Q,
+		P:               P,
 		LogDefaultScale: 40,
 	}
 	pubCTX, clientCTX, authCTX := BeginProtocol(SchemeParams)
@@ -229,13 +249,131 @@ func main() {
 	encoder := pubCTX.encoder
 	encryptor := pubCTX.encryptor
 	// evaluator := pubCTX.evaluator
+
+	// TODO : SK shares 만들기
+	//party 개수, hyperparameter는 이거밖에 없음
+	partyNum := 5
+	fmt.Println("client sk share 생성")
+
+	// 각 party SK Share의 CRT representation과 BigInt representation
+	// 첫번째 인덱스는 무조건 각 party의 인덱스를 말함
+	// CRT representation은 ringQ, ringP의 계수로 나눠서 저장하는 형태입니다. (ringQ의 계수는 Q0Q1, ringP의 계수는 Q2...Qdnum P)
+	// BigInt representation은 CRT representation을 CRT로 합쳐서 하나의 big.Int로 표현한 형태입니다. (계수마다 하나의 big.Int)
+	polysCRT := make([]ringqp.Poly, partyNum)
+	polysBigint := make([][]*big.Int, partyNum)
+
+	ringQP := params.RingQP()
+	moduli := make([]uint64, len(params.Q())+len(params.P()))
+	copy(moduli, ringQP.RingQ.ModuliChain())
+	copy(moduli[len(params.Q()):], ringQP.RingP.ModuliChain())
+	// ######## step 1. SK share (sk_auth = sum_{1<= i <= n} sk_{auth,i}) ######
+	{
+		// 각 party의 SK share를 CRT representation으로 만듭니다. (마지막 party는 sk_auth - sum_{1<= i <n} sk_{auth,i})
+		for i := range partyNum - 1 {
+			polysCRT[i] = ringQP.NewPoly()
+			for j := range polysCRT[i].Q.Coeffs {
+				for k := range polysCRT[i].Q.Coeffs[j] {
+					polysCRT[i].Q.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingQ.ModuliChain()[j]
+				}
+			}
+
+			for j := range polysCRT[i].P.Coeffs {
+				for k := range polysCRT[i].P.Coeffs[j] {
+					polysCRT[i].P.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingP.ModuliChain()[j]
+				}
+			}
+		}
+
+		polysCRT[partyNum-1] = *authCTX.sk.Value.CopyNew()
+		for i := range partyNum - 1 {
+			ringQP.Sub(polysCRT[partyNum-1], polysCRT[i], polysCRT[partyNum-1])
+			ringQP.Reduce(polysCRT[partyNum-1], polysCRT[partyNum-1])
+		}
+
+		// Normal form (Mform, NTTform 둘다 아님)으로 저장합니다. 굳이 필요없으면 주석 처리해도 됩니다. 다만, verification check할 때 비교대상도 Normal form으로 만들어야 합니다.
+		for i := range partyNum {
+			ringQP.IMForm(polysCRT[i], polysCRT[i])
+			ringQP.INTT(polysCRT[i], polysCRT[i])
+		}
+
+		coef := make([]uint64, len(moduli))
+		for i := range partyNum {
+			polysBigint[i] = make([]*big.Int, params.N())
+			for j := range params.N() {
+				for k := range polysCRT[i].Q.Coeffs {
+					coef[k] = polysCRT[i].Q.Coeffs[k][j]
+				}
+				for k := range polysCRT[i].P.Coeffs {
+					coef[len(params.Q())+k] = polysCRT[i].P.Coeffs[k][j]
+				}
+
+				polysBigint[i][j], _, _ = crt.CRTUint64(coef, moduli)
+			}
+		}
+	}
+
+	// ######## sk share verification check (SUM == sk_auth??) ######
+	{
+		polystemp := make([]*big.Int, params.N())
+		for i := range polystemp {
+			polystemp[i] = big.NewInt(0)
+		}
+
+		coef := make([]uint64, len(moduli))
+		polyCRT := ringQP.NewPoly()
+		for i := range params.N() {
+			for j := range partyNum {
+				polystemp[i] = new(big.Int).Add(polystemp[i], polysBigint[j][i])
+			}
+			copy(coef, ringQP.RingQ.NewRNSScalarFromBigint(polystemp[i]))
+			copy(coef[len(params.Q()):], ringQP.RingP.NewRNSScalarFromBigint(polystemp[i]))
+
+			for j := range polyCRT.Q.Coeffs {
+				polyCRT.Q.Coeffs[j][i] = coef[j]
+			}
+			for j := range polyCRT.P.Coeffs {
+				polyCRT.P.Coeffs[j][i] = coef[len(params.Q())+j]
+			}
+		}
+		sktemp := *authCTX.sk.Value.CopyNew()
+		// Normal form으로 만들어서 비교합니다. (위에 주석 처리했다면 여기도 주석처리해야 verification check 통과할 수 있습니다.)
+		ringQP.IMForm(sktemp, sktemp)
+		ringQP.INTT(sktemp, sktemp)
+
+		isOK := true
+		for i := range sktemp.Q.Coeffs {
+			for j := range sktemp.Q.Coeffs[i] {
+				if sktemp.Q.Coeffs[i][j] != polyCRT.Q.Coeffs[i][j] {
+					isOK = false
+					break
+				}
+			}
+		}
+		for i := range sktemp.P.Coeffs {
+			for j := range sktemp.P.Coeffs[i] {
+				if sktemp.P.Coeffs[i][j] != polyCRT.P.Coeffs[i][j] {
+					isOK = false
+					break
+				}
+			}
+		}
+
+		if isOK {
+			fmt.Println("SK share 생성 성공")
+		} else {
+			fmt.Println("SK share 생성 실패")
+		}
+		fmt.Println()
+	}
+	// TODO End
+
 	skNew := SecRes(pubCTX, authCTX)
 
 	fmt.Println("키 직접 비교")
 	{
 		isOk := true
 		for i := range skNew.Value.Q.Coeffs {
-			for j := range skNew.Value.Q.Coeffs {
+			for j := range skNew.Value.Q.Coeffs[i] {
 				if skNew.Value.Q.Coeffs[i][j] != clientCTX.sk.Value.Q.Coeffs[i][j] {
 					isOk = false
 					break
@@ -288,4 +426,69 @@ func main() {
 		fmt.Println("max-bit-precision", -math.Log2(maxerr))
 	}
 
+}
+
+// filename 경로에 q, p를 저장합니다
+func SaveModuliToTXT(filename string, q, p []uint64) {
+	f, _ := os.Create(filename)
+	defer f.Close()
+
+	qStr := uint64SliceToString(q)
+	pStr := uint64SliceToString(p)
+
+	fmt.Fprintf(f, "q=%s\np=%s\n", qStr, pStr)
+}
+
+// filename 경로에서 q, p를 읽어옵니다
+func LoadModuliFromTXT(filename string) (q, p []uint64) {
+	f, _ := os.Open(filename)
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "q="):
+			q = parseUint64Slice(strings.TrimPrefix(line, "q="))
+
+		case strings.HasPrefix(line, "p="):
+			p = parseUint64Slice(strings.TrimPrefix(line, "p="))
+		}
+	}
+
+	return q, p
+}
+
+func uint64SliceToString(nums []uint64) string {
+	if len(nums) == 0 {
+		return ""
+	}
+
+	parts := make([]string, len(nums))
+	for i, v := range nums {
+		parts[i] = strconv.FormatUint(v, 10)
+	}
+	return strings.Join(parts, ",")
+}
+
+func parseUint64Slice(s string) []uint64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []uint64{}
+	}
+
+	parts := strings.Split(s, ",")
+	res := make([]uint64, len(parts))
+
+	for i, part := range parts {
+		v, _ := strconv.ParseUint(strings.TrimSpace(part), 10, 64)
+		res[i] = v
+	}
+
+	return res
 }
