@@ -3,10 +3,12 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"math/cmplx"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -117,6 +119,34 @@ func BeginProtocol(paramsliteral hefloat.ParametersLiteral) (PublicSideContext, 
 }
 
 func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
+
+	// b0,b1,sk_{auth,i}
+	// b0 = [coeff]big.Int
+	// b1 = [coeff]big.Int
+	// sk_share = [party][coeff]big.Int
+	// PQ = big.int
+	// Q0Q1 = big.int
+
+	// 2. MP-SPDZ 실행 명령 설정
+	// 예: ./mascot-party.x -N 2 0 tutorial
+	cmd := exec.Command("./mascot-party.x", "-N", "2", "0", "tutorial")
+
+	// MP-SPDZ가 있는 디렉토리로 설정 (필요시)
+	cmd.Dir = "/home/paiclab/Documents/ckw/FEHE/Forensic-Enabled-CKKS/MP-SPDZ"
+
+	// 실행 결과(Stdout, Stderr)를 현재 터미널에 연결
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// 3. MP-SPDZ 실행
+	fmt.Println("MP-SPDZ 프로세스 시작...")
+	err := cmd.Run()
+	if err != nil {
+		log.Fatalf("MP-SPDZ 실행 실패: %s", err)
+	}
+
+	fmt.Println("모든 프로세스 완료.")
+
 	params := pubCTX.params
 	gk := pubCTX.conjKey
 	skAuth := authCTX.sk
@@ -293,8 +323,9 @@ func main() {
 		// Normal form (Mform, NTTform 둘다 아님)으로 저장합니다. 굳이 필요없으면 주석 처리해도 됩니다. 다만, verification check할 때 비교대상도 Normal form으로 만들어야 합니다.
 		for i := range partyNum {
 			ringQP.IMForm(polysCRT[i], polysCRT[i])
-			ringQP.INTT(polysCRT[i], polysCRT[i])
+			//ringQP.INTT(polysCRT[i], polysCRT[i])
 		}
+		// coefficient form에서 CRT merge
 
 		coef := make([]uint64, len(moduli))
 		for i := range partyNum {
@@ -338,7 +369,7 @@ func main() {
 		sktemp := *authCTX.sk.Value.CopyNew()
 		// Normal form으로 만들어서 비교합니다. (위에 주석 처리했다면 여기도 주석처리해야 verification check 통과할 수 있습니다.)
 		ringQP.IMForm(sktemp, sktemp)
-		ringQP.INTT(sktemp, sktemp)
+		//ringQP.INTT(sktemp, sktemp)
 
 		isOK := true
 		for i := range sktemp.Q.Coeffs {
