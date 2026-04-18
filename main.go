@@ -3,12 +3,10 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"math"
 	"math/big"
 	"math/cmplx"
 	"os"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"strings"
@@ -118,66 +116,391 @@ func BeginProtocol(paramsliteral hefloat.ParametersLiteral) (PublicSideContext, 
 	return pubCTX, clientCTX, authCTX
 }
 
-func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
+func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.SecretKey {
 
-	// b0,b1,sk_{auth,i}
-	// b0 = [coeff]big.Int
-	// b1 = [coeff]big.Int
-	// sk_share = [party][coeff]big.Int
-	// PQ = big.int
-	// Q0Q1 = big.int
+	//debug := false
 
-	// 2. MP-SPDZ 실행 명령 설정
-	// 예: ./mascot-party.x -N 2 0 tutorial
-	cmd := exec.Command("./mascot-party.x", "-N", "2", "0", "tutorial")
-
-	// MP-SPDZ가 있는 디렉토리로 설정 (필요시)
-	cmd.Dir = "/home/paiclab/Documents/ckw/FEHE/Forensic-Enabled-CKKS/MP-SPDZ"
-
-	// 실행 결과(Stdout, Stderr)를 현재 터미널에 연결
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	// 3. MP-SPDZ 실행
-	fmt.Println("MP-SPDZ 프로세스 시작...")
-	err := cmd.Run()
-	if err != nil {
-		log.Fatalf("MP-SPDZ 실행 실패: %s", err)
-	}
-
-	fmt.Println("모든 프로세스 완료.")
+	fmt.Printf("Setup Start!")
 
 	params := pubCTX.params
 	gk := pubCTX.conjKey
 	skAuth := authCTX.sk
-	ringqp := params.RingQP()
+	ringQP := params.RingQP()
+
+	moduli := make([]uint64, len(params.Q())+len(params.P()))
+	copy(moduli, ringQP.RingQ.ModuliChain())
+	copy(moduli[len(params.Q()):], ringQP.RingP.ModuliChain())
+	PQ := big.NewInt(1)
+	// moduli의 모든 원소를 순회하며 곱셈 수행
+	for _, v := range moduli {
+		// uint64 타입인 v를 *big.Int 타입으로 변환
+		val := new(big.Int).SetUint64(v)
+
+		// PQ = PQ * val
+		PQ.Mul(PQ, val)
+	}
+
+	numParties := num
+	degree := 65535 // 16개의 계수 (SIMD 병렬 처리)
+	scheme := NewSecretSharingScheme(PQ, numParties, degree)
+
+	// 2. 참여자 초기화
+	parties := make([]*Party, numParties)
+	for i := 0; i < numParties; i++ {
+		parties[i] = &Party{
+			ID:          i,
+			InputShares: make([][]AdditiveShare, 0),
+			BitShares:   make([][]BitShares, 0),
+		}
+	}
+
+	// 3. 오프라인 단계: 트리플 생성
+	// 이진 트리 방식은 라운드를 획기적으로 줄이는 대신, 각 계층마다 병렬 곱셈이 발생하므로
+	// 선형 방식보다 더 많은 트리플을 소모합니다. 128비트 기준 약 256개의 트리플이 필요합니다.
+	// 여유롭게 500개를 생성합니다.
+
+	fmt.Printf("Gen BeaverTriples... ")
+	triples := scheme.GenerateBeaverTriples(1)
+	for i := 0; i < numParties; i++ {
+		parties[i].BeaverTriple = triples[i]
+	}
+	fmt.Println(" Done!")
+
+	//numCoeffs := degree + 1
 
 	b0 := *gk.Value[0][0][0].CopyNew()
 	b1 := *gk.Value[1][0][0].CopyNew()
+	sk_auth := *skAuth.Value.CopyNew()
+
+	fmt.Printf("Gen b0 shares... ")
+	coef := make([]uint64, len(moduli))
+	b0polysBigint := make([]*big.Int, params.N())
+	for j := range params.N() {
+		for k := range b0.Q.Coeffs {
+			coef[k] = b0.Q.Coeffs[k][j]
+		}
+		for k := range b0.P.Coeffs {
+			coef[len(params.Q())+k] = b0.P.Coeffs[k][j]
+		}
+
+		b0polysBigint[j], _, _ = crt.CRTUint64(coef, moduli)
+	}
+
+	sharesb0 := scheme.ShareSever(b0polysBigint)
+	fmt.Println(" Done!")
+
+	fmt.Printf("Gen b1 shares... ")
+	coef = make([]uint64, len(moduli))
+	b1polysBigint := make([]*big.Int, params.N())
+	for j := range params.N() {
+		for k := range b1.Q.Coeffs {
+			coef[k] = b1.Q.Coeffs[k][j]
+		}
+		for k := range b1.P.Coeffs {
+			coef[len(params.Q())+k] = b1.P.Coeffs[k][j]
+		}
+
+		b1polysBigint[j], _, _ = crt.CRTUint64(coef, moduli)
+	}
+
+	sharesb1 := scheme.ShareSever(b1polysBigint)
+	fmt.Println(" Done!")
+
+	fmt.Printf("Gen sk_auth shares... ")
+	coef = make([]uint64, len(moduli))
+	skpolysBigint := make([]*big.Int, params.N())
+	for j := range params.N() {
+		for k := range sk_auth.Q.Coeffs {
+			coef[k] = sk_auth.Q.Coeffs[k][j]
+		}
+		for k := range sk_auth.P.Coeffs {
+			coef[len(params.Q())+k] = sk_auth.P.Coeffs[k][j]
+		}
+
+		skpolysBigint[j], _, _ = crt.CRTUint64(coef, moduli)
+	}
+
+	sharessk := scheme.ShareAuthority(skpolysBigint)
+
+	for i := 0; i < numParties; i++ {
+		// 초기 InputShares 구성: [0]: X의 쉐어, [1]: Y의 쉐어
+		parties[i].InputShares = [][]AdditiveShare{sharesb0[i], sharesb1[i], sharessk[i]}
+	}
+	fmt.Println(" Done!")
+
+	fmt.Printf("Step 1...")
+	scheme.Multiply(parties, 1, 2, 0, 2)
+	scheme.Add(parties, 0, 2, 0)
+
+	PQ_big := params.Q()
+	for _, v := range params.P() {
+		PQ_big = append(PQ_big, v)
+	}
+	PQ_big_big := make([]*big.Int, len(PQ_big))
+	for i := 0; i < len(PQ_big_big); i++ {
+		PQ_big_big[i] = new(big.Int).SetUint64(PQ_big[i])
+	}
+
+	//scheme.LocalNegacyclicINTT(parties, 0, PQ_big_big, params.N(), 0)
+
+	// ######## step 1. b0 + b1 * skAuth ######
+	ringQP.MulCoeffsMontgomery(b1, skAuth.Value, b1)
+	ringQP.Add(b0, b1, b0)
+	ringQP.Reduce(b0, b0)
+	ringQP.IMForm(b0, b0)
+
+	// 6. 결과 복원 (Open) 및 검증
+	// 모든 참여자의 InputShares[2] (곱셈 결과)를 수집하여 Open 호출
+	resultIdx := 0
+	allResultShares := make([][]AdditiveShare, numParties)
+	for i := 0; i < numParties; i++ {
+		allResultShares[i] = parties[i].InputShares[resultIdx]
+	}
+
+	finalResult := scheme.Open(allResultShares)
+
+	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
+	isVerbose := false
+	allPassed := true
+
+	fmt.Println(len(b0.P.Coeffs[0]))
+
+	fmt.Println("\n--- 결과 검증 ---")
+	for i := 0; i < params.N(); i++ {
+		finalResult[i] = finalResult[i].Mod(finalResult[i], new(big.Int).SetUint64(params.Q()[0]))
+		expected := new(big.Int).SetUint64(b0.Q.Coeffs[0][i])
+
+		if isVerbose {
+			// 상세 출력 모드
+			fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected)
+
+		} else {
+			// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
+			diff := new(big.Int).Sub(finalResult[i], expected)
+			diff.Mod(diff, PQ)
+
+			if diff.Cmp(big.NewInt(0)) == 0 {
+				//fmt.Printf("계수 [%d]: PASS\n", i)
+			} else {
+				fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
+				allPassed = false
+				break // 하나라도 실패하면 중단
+			}
+		}
+	}
+
+	if !isVerbose && allPassed {
+		fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
+	} else if !allPassed {
+		fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
+	}
+
+	// 7. 통신 통계 출력
+	fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
+	fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
+	fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
+
+	fmt.Println(" Done!")
+
+	fmt.Printf("Step 2... ")
 	var perLevel int
 	{
 		temp := float64(len(params.Q())) / float64(len(gk.Value))
 		perLevel = int(math.Ceil(temp))
 	}
+
 	Q0Q1level := perLevel * 2
-
-	// ######## step 1. b0 + b1 * skAuth ######
-	ringqp.MulCoeffsMontgomery(b1, skAuth.Value, b1)
-	ringqp.Add(b0, b1, b0)
-	ringqp.Reduce(b0, b0)
-	ringqp.IMForm(b0, b0)
-	// ##########################################
-
-	// ######## step 2. ModDown ######
-	N := params.N()
-	// Q_ : Q0Q1, P_ : Q2...Qdnum P
 	Q_ := params.Q()
+	// Q_ = append(Q_, params.P()...)
+	// Q_big := make([]*big.Int, len(Q_))
+	// for i := 0; i < len(Q_big); i++ {
+	// 	Q_big[i] = new(big.Int).SetUint64(Q_[i])
+	// }
+
+	//scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0)
+
+	Q_ = params.Q()
 	P_ := Q_[Q0Q1level:]
 	for _, v := range params.P() {
 		P_ = append(P_, v)
 	}
 	Q_ = Q_[:Q0Q1level]
+	Q0Q1 := big.NewInt(1)
+	Pbig := big.NewInt(1)
+	for _, v := range Q_ {
+		// uint64 타입인 v를 *big.Int 타입으로 변환
+		val := new(big.Int).SetUint64(v)
 
+		// PQ = PQ * val
+		Q0Q1.Mul(Q0Q1, val)
+	}
+
+	P_mod := new(big.Int).ModInverse(new(big.Int).Mod(Pbig, Q0Q1), Q0Q1)
+
+	//fmt.Println(Q_)
+	//fmt.Println(P_)
+	for _, v := range P_ {
+		// uint64 타입인 v를 *big.Int 타입으로 변환
+		val := new(big.Int).SetUint64(v)
+
+		// PQ = PQ * val
+		Pbig.Mul(Pbig, val)
+	}
+
+	scheme.Mod(parties, 0, Pbig, 1)
+
+	publicVals := make([]*big.Int, params.N())
+
+	for j := 0; j < params.N(); j++ {
+		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+		c := Pbig
+		publicVals[j] = c
+	}
+
+	for i := 0; i < num-1; i++ {
+		fmt.Printf("compare... ")
+		scheme.ComparePublicTree(parties, 1, publicVals, Pbig.BitLen(), 2, 3)
+		fmt.Println(" Done!")
+		fmt.Printf("conditonal sub... ")
+		scheme.ConditionalSubPublic(parties, 1, publicVals, 2, 1)
+		fmt.Println(" Done!")
+	}
+
+	scheme.Sub(parties, 0, 1, 0)
+	scheme.Modulus = Q0Q1
+	scheme.Mod(parties, 0, Q0Q1, 0)
+
+	for j := 0; j < params.N(); j++ {
+		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+		c := P_mod
+		publicVals[j] = c
+	}
+	scheme.MultiplyPublic(parties, 0, publicVals, 0)
+	//scheme.Mod(parties, 0, Q0Q1, 0)
+	Q_big := make([]*big.Int, len(Q_))
+	for i := 0; i < len(Q_big); i++ {
+		Q_big[i] = new(big.Int).SetUint64(Q_[i])
+	}
+
+	scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0)
+	// scheme.GenerateRandomFieldShare(parties, 4)
+	// scheme.Inverse(parties, 0, 4, 0, 0)
+	//scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0)
+
+	Q := params.Q()
+	blockA := make([]int, perLevel)
+	blockB := make([]int, perLevel)
+	for i := range perLevel {
+		blockA[i] = i
+		blockB[i] = i + perLevel
+	}
+
+	// t0 = Q1[Q0hat]^-1, t1 = Q0[Q1hat]^-1
+	t0, _ := crt.ComputeValue(Q, blockB, blockA)
+	t1, _ := crt.ComputeValue(Q, blockA, blockB)
+
+	for j := 0; j < params.N(); j++ {
+		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+		c := t1
+		publicVals[j] = c
+	}
+
+	for i := 0; i < numParties; i++ {
+		// 초기 InputShares 구성: [0]: X의 쉐어, [1]: Y의 쉐어
+		parties[i].InputShares[1] = sharessk[i]
+	}
+
+	scheme.MultiplyPublic(parties, 1, publicVals, 1)
+
+	for j := 0; j < params.N(); j++ {
+		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+		c := t0
+		publicVals[j] = c
+	}
+
+	scheme.AddPublic(parties, 1, publicVals, 1)
+
+	scheme.GenerateRandomFieldShare(parties, 4)
+	scheme.Inverse(parties, 1, 4, 0, 1)
+	//scheme.LocalNegacyclicNTT(parties, 1, Q_big, params.N(), 1)
+
+	scheme.Multiply(parties, 0, 1, 0, 0)
+	scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0)
+	fmt.Println(" Done!")
+
+	// // 6. 결과 복원 (Open) 및 검증
+	// // 모든 참여자의 InputShares[2] (곱셈 결과)를 수집하여 Open 호출
+	// resultIdx := 0
+	// allResultShares := make([][]AdditiveShare, numParties)
+	// for i := 0; i < numParties; i++ {
+	// 	allResultShares[i] = parties[i].InputShares[resultIdx]
+	// }
+
+	// finalResult := scheme.Open(allResultShares)
+
+	// // isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
+	// isVerbose := false
+	// allPassed := true
+
+	// fmt.Println("\n--- 결과 검증 ---")
+	// for i := 0; i < params.N(); i++ {
+	// 	// 1. 기대값 계산 (Expected = valX * valY mod M)
+	// 	expected := new(big.Int).Mul(b1polysBigint[i], skpolysBigint[i])
+	// 	expected.Mod(expected, PQ)
+	// 	expected = new(big.Int).Add(expected, b0polysBigint[i])
+	// 	temp := new(big.Int).Mod(expected, Pbig)
+	// 	expected = new(big.Int).Sub(expected, temp)
+	// 	expected = new(big.Int).Mod(expected, Q0Q1)
+	// 	expected = new(big.Int).Mul(expected, P_mod)
+	// 	expected = new(big.Int).Mod(expected, Q0Q1)
+	// 	//expected = new(big.Int).Mul(expected, expected)
+	// 	//expected = new(big.Int).Mod(expected, Q0Q1)
+	// 	expected = new(big.Int).ModInverse(expected, Q0Q1)
+	// 	expected = new(big.Int).Mod(expected, Q0Q1)
+
+	// 	if isVerbose {
+	// 		// 상세 출력 모드
+	// 		fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected.String())
+
+	// 	} else {
+	// 		// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
+	// 		diff := new(big.Int).Sub(finalResult[i], expected)
+	// 		diff.Mod(diff, PQ)
+
+	// 		if diff.Cmp(big.NewInt(0)) == 0 {
+	// 			//fmt.Printf("계수 [%d]: PASS\n", i)
+	// 		} else {
+	// 			fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
+	// 			allPassed = false
+	// 			break // 하나라도 실패하면 중단
+	// 		}
+	// 	}
+	// }
+
+	// if !isVerbose && allPassed {
+	// 	fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
+	// } else if !allPassed {
+	// 	fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
+	// }
+
+	// // 7. 통신 통계 출력
+	// fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
+	// fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
+	// fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
+
+	// ##########################################
+
+	// ######## step 2. ModDown ######
+	N := params.N()
+	// Q_ : Q0Q1, P_ : Q2...Qdnum P
+	Q_ = params.Q()
+	P_ = Q_[Q0Q1level:]
+	for _, v := range params.P() {
+		P_ = append(P_, v)
+	}
+	Q_ = Q_[:Q0Q1level]
+
+	//fmt.Println(Q_, P_)
 	ringQ_, _ := ring.NewRing(N, Q_)
 	ringP_, _ := ring.NewRing(N, P_)
 	be := crt.NewBasisExtender(ringQ_, ringP_)
@@ -203,17 +526,17 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	}
 
 	// ######## step 3. compute Q1[Q0hat]^-1 + Q0[Q1hat]^-1 * skAuth ######
-	Q := params.Q()
-	blockA := make([]int, perLevel)
-	blockB := make([]int, perLevel)
+	Q = params.Q()
+	blockA = make([]int, perLevel)
+	blockB = make([]int, perLevel)
 	for i := range perLevel {
 		blockA[i] = i
 		blockB[i] = i + perLevel
 	}
 
 	// t0 = Q1[Q0hat]^-1, t1 = Q0[Q1hat]^-1
-	t0, _ := crt.ComputeValue(Q, blockB, blockA)
-	t1, _ := crt.ComputeValue(Q, blockA, blockB)
+	t0, _ = crt.ComputeValue(Q, blockB, blockA)
+	t1, _ = crt.ComputeValue(Q, blockA, blockB)
 
 	ringQ_.MulScalarBigint(polskAuth, t1, polskAuth)
 	ringQ_.IMForm(polskAuth, polskAuth)
@@ -222,7 +545,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 	ringQ_.Reduce(polskAuth, polskAuth)
 
 	// ######## step 4. compute inverse of Q1[Q0hat]^-1 + Q0[Q1hat]^-1 * skAuth ######
-	coef := make([]uint64, len(ringQ_.ModuliChain()))
+	coef = make([]uint64, len(ringQ_.ModuliChain()))
 	for j := range N {
 		for i := range polskAuth.Coeffs {
 			coef[i] = polskAuth.Coeffs[i][j]
@@ -252,8 +575,8 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 		copy(sk.Value.P.Coeffs[i], v)
 	}
 
-	ringqp.MForm(sk.Value, sk.Value)
-	ringqp.NTT(sk.Value, sk.Value)
+	ringQP.MForm(sk.Value, sk.Value)
+	ringQP.NTT(sk.Value, sk.Value)
 	// ringQ_.MForm(polres, polres)
 	// return polres
 	return sk
@@ -262,6 +585,12 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext) *rlwe.SecretKey {
 func main() {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	//Test_share()
+	//Test_ComparePublic_Workflow()
+	//Test_ComparePublicTree_Workflow()
+
+	//return
 
 	// Moduli 생성 관련은 moduli_test.go에 따로 분리
 	modulipath := "moduli.txt"
@@ -282,7 +611,7 @@ func main() {
 
 	// TODO : SK shares 만들기
 	//party 개수, hyperparameter는 이거밖에 없음
-	partyNum := 5
+	partyNum := 2
 	fmt.Println("client sk share 생성")
 
 	// 각 party SK Share의 CRT representation과 BigInt representation
@@ -398,7 +727,7 @@ func main() {
 	}
 	// TODO End
 
-	skNew := SecRes(pubCTX, authCTX)
+	skNew := SecRes(pubCTX, authCTX, partyNum)
 
 	fmt.Println("키 직접 비교")
 	{
