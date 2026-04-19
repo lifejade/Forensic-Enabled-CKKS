@@ -17,7 +17,6 @@ import (
 	"github.com/tuneinsight/lattigo/v5/core/rlwe"
 	"github.com/tuneinsight/lattigo/v5/he/hefloat"
 	"github.com/tuneinsight/lattigo/v5/ring"
-	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
 	"github.com/tuneinsight/lattigo/v5/utils/bignum"
 	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
@@ -333,15 +332,15 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	scheme.Mod(parties, 0, Pbig, 1)
 	//fmt.Println(Pbig)
 
-	publicVals = make([]*big.Int, params.N())
-	for j := 0; j < params.N(); j++ {
-		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
-		c := Pbig
-		publicVals[j] = c
-	}
+	lognum := int(math.Floor(math.Log2(float64(num-1)))) + 1
+	for i := 0; i < lognum; i++ {
+		publicVals = make([]*big.Int, params.N())
+		for j := 0; j < params.N(); j++ {
+			// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+			c := new(big.Int).Mul(Pbig, big.NewInt(1<<(lognum-1-i)))
+			publicVals[j] = c
+		}
 
-	//lognum := int(math.Floor(math.Log2(float64(num)))) + 1
-	for i := 0; i < num-1; i++ {
 		fmt.Printf("compare... ")
 		scheme.ComparePublicTree(parties, 1, publicVals, Pbig.BitLen(), 2, 3)
 		fmt.Println(" Done!")
@@ -368,6 +367,8 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	for i := 0; i < len(Q_big); i++ {
 		Q_big[i] = new(big.Int).SetUint64(Q_[i])
 	}
+
+	scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0, moduli)
 
 	//scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0, moduli)
 
@@ -398,7 +399,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	//ringQ_.INTT(polres, polres)
 	//ringQ_.IMForm(polres, polres)
 
-	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
+	//PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
 	// 6. 결과 복원 (Open) 및 검증
 
 	// scheme.GenerateRandomFieldShare(parties, 4)
@@ -478,21 +479,22 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	}
 
 	ringQ_.MulCoeffsMontgomery(polskAuth, polres, polres)
-	//ringQ_.INTT(polres, polres)
+	ringQ_.INTT(polres, polres)
 
 	scheme.GenerateRandomFieldShare(parties, 4)
 
 	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
 	scheme.Modulus = Q0Q1
 	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
-	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
+	//PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
 	scheme.Inverse(parties, 1, 4, 0, 1)
+	//PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polskAuth, 1)
 	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
 	//ringQ_.IMForm(polskAuth, polskAuth)
 	//PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polskAuth, 1)
 
 	scheme.Multiply(parties, 0, 1, 0, 0)
-	//scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0, moduli)
+	scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0, moduli)
 	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
 	fmt.Println(" Done!")
 
@@ -552,179 +554,182 @@ func main() {
 
 	// TODO : SK shares 만들기
 	//party 개수, hyperparameter는 이거밖에 없음
-	partyNum := 2
-	fmt.Println("client sk share 생성")
 
-	// 각 party SK Share의 CRT representation과 BigInt representation
-	// 첫번째 인덱스는 무조건 각 party의 인덱스를 말함
-	// CRT representation은 ringQ, ringP의 계수로 나눠서 저장하는 형태입니다. (ringQ의 계수는 Q0Q1, ringP의 계수는 Q2...Qdnum P)
-	// BigInt representation은 CRT representation을 CRT로 합쳐서 하나의 big.Int로 표현한 형태입니다. (계수마다 하나의 big.Int)
-	polysCRT := make([]ringqp.Poly, partyNum)
-	polysBigint := make([][]*big.Int, partyNum)
+	// fmt.Println("client sk share 생성")
 
-	ringQP := params.RingQP()
-	moduli := make([]uint64, len(params.Q())+len(params.P()))
-	copy(moduli, ringQP.RingQ.ModuliChain())
-	copy(moduli[len(params.Q()):], ringQP.RingP.ModuliChain())
-	// ######## step 1. SK share (sk_auth = sum_{1<= i <= n} sk_{auth,i}) ######
-	{
-		// 각 party의 SK share를 CRT representation으로 만듭니다. (마지막 party는 sk_auth - sum_{1<= i <n} sk_{auth,i})
-		for i := range partyNum - 1 {
-			polysCRT[i] = ringQP.NewPoly()
-			for j := range polysCRT[i].Q.Coeffs {
-				for k := range polysCRT[i].Q.Coeffs[j] {
-					polysCRT[i].Q.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingQ.ModuliChain()[j]
+	// // 각 party SK Share의 CRT representation과 BigInt representation
+	// // 첫번째 인덱스는 무조건 각 party의 인덱스를 말함
+	// // CRT representation은 ringQ, ringP의 계수로 나눠서 저장하는 형태입니다. (ringQ의 계수는 Q0Q1, ringP의 계수는 Q2...Qdnum P)
+	// // BigInt representation은 CRT representation을 CRT로 합쳐서 하나의 big.Int로 표현한 형태입니다. (계수마다 하나의 big.Int)
+	// polysCRT := make([]ringqp.Poly, partyNum)
+	// polysBigint := make([][]*big.Int, partyNum)
+
+	// ringQP := params.RingQP()
+	// moduli := make([]uint64, len(params.Q())+len(params.P()))
+	// copy(moduli, ringQP.RingQ.ModuliChain())
+	// copy(moduli[len(params.Q()):], ringQP.RingP.ModuliChain())
+	// // ######## step 1. SK share (sk_auth = sum_{1<= i <= n} sk_{auth,i}) ######
+	// {
+	// 	// 각 party의 SK share를 CRT representation으로 만듭니다. (마지막 party는 sk_auth - sum_{1<= i <n} sk_{auth,i})
+	// 	for i := range partyNum - 1 {
+	// 		polysCRT[i] = ringQP.NewPoly()
+	// 		for j := range polysCRT[i].Q.Coeffs {
+	// 			for k := range polysCRT[i].Q.Coeffs[j] {
+	// 				polysCRT[i].Q.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingQ.ModuliChain()[j]
+	// 			}
+	// 		}
+
+	// 		for j := range polysCRT[i].P.Coeffs {
+	// 			for k := range polysCRT[i].P.Coeffs[j] {
+	// 				polysCRT[i].P.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingP.ModuliChain()[j]
+	// 			}
+	// 		}
+	// 	}
+
+	// 	polysCRT[partyNum-1] = *authCTX.sk.Value.CopyNew()
+	// 	for i := range partyNum - 1 {
+	// 		ringQP.Sub(polysCRT[partyNum-1], polysCRT[i], polysCRT[partyNum-1])
+	// 		ringQP.Reduce(polysCRT[partyNum-1], polysCRT[partyNum-1])
+	// 	}
+
+	// 	// Normal form (Mform, NTTform 둘다 아님)으로 저장합니다. 굳이 필요없으면 주석 처리해도 됩니다. 다만, verification check할 때 비교대상도 Normal form으로 만들어야 합니다.
+	// 	for i := range partyNum {
+	// 		ringQP.IMForm(polysCRT[i], polysCRT[i])
+	// 		//ringQP.INTT(polysCRT[i], polysCRT[i])
+	// 	}
+	// 	// coefficient form에서 CRT merge
+
+	// 	coef := make([]uint64, len(moduli))
+	// 	for i := range partyNum {
+	// 		polysBigint[i] = make([]*big.Int, params.N())
+	// 		for j := range params.N() {
+	// 			for k := range polysCRT[i].Q.Coeffs {
+	// 				coef[k] = polysCRT[i].Q.Coeffs[k][j]
+	// 			}
+	// 			for k := range polysCRT[i].P.Coeffs {
+	// 				coef[len(params.Q())+k] = polysCRT[i].P.Coeffs[k][j]
+	// 			}
+
+	// 			polysBigint[i][j], _, _ = crt.CRTUint64(coef, moduli)
+	// 		}
+	// 	}
+	// }
+
+	// // ######## sk share verification check (SUM == sk_auth??) ######
+	// {
+	// 	polystemp := make([]*big.Int, params.N())
+	// 	for i := range polystemp {
+	// 		polystemp[i] = big.NewInt(0)
+	// 	}
+
+	// 	coef := make([]uint64, len(moduli))
+	// 	polyCRT := ringQP.NewPoly()
+	// 	for i := range params.N() {
+	// 		for j := range partyNum {
+	// 			polystemp[i] = new(big.Int).Add(polystemp[i], polysBigint[j][i])
+	// 		}
+	// 		copy(coef, ringQP.RingQ.NewRNSScalarFromBigint(polystemp[i]))
+	// 		copy(coef[len(params.Q()):], ringQP.RingP.NewRNSScalarFromBigint(polystemp[i]))
+
+	// 		for j := range polyCRT.Q.Coeffs {
+	// 			polyCRT.Q.Coeffs[j][i] = coef[j]
+	// 		}
+	// 		for j := range polyCRT.P.Coeffs {
+	// 			polyCRT.P.Coeffs[j][i] = coef[len(params.Q())+j]
+	// 		}
+	// 	}
+	// 	sktemp := *authCTX.sk.Value.CopyNew()
+	// 	// Normal form으로 만들어서 비교합니다. (위에 주석 처리했다면 여기도 주석처리해야 verification check 통과할 수 있습니다.)
+	// 	ringQP.IMForm(sktemp, sktemp)
+	// 	//ringQP.INTT(sktemp, sktemp)
+
+	// 	isOK := true
+	// 	for i := range sktemp.Q.Coeffs {
+	// 		for j := range sktemp.Q.Coeffs[i] {
+	// 			if sktemp.Q.Coeffs[i][j] != polyCRT.Q.Coeffs[i][j] {
+	// 				isOK = false
+	// 				break
+	// 			}
+	// 		}
+	// 	}
+	// 	for i := range sktemp.P.Coeffs {
+	// 		for j := range sktemp.P.Coeffs[i] {
+	// 			if sktemp.P.Coeffs[i][j] != polyCRT.P.Coeffs[i][j] {
+	// 				isOK = false
+	// 				break
+	// 			}
+	// 		}
+	// 	}
+
+	// 	if isOK {
+	// 		fmt.Println("SK share 생성 성공")
+	// 	} else {
+	// 		fmt.Println("SK share 생성 실패")
+	// 	}
+	// 	fmt.Println()
+	// }
+	// // TODO End
+
+	//partyNum := 2
+	for partyNum := 2; partyNum < 11; partyNum++ {
+		fmt.Println("### (t+1) = ", partyNum)
+		skNew := SecRes(pubCTX, authCTX, partyNum)
+		fmt.Println("키 직접 비교")
+		{
+			isOk := true
+			for i := range skNew.Value.Q.Coeffs {
+				for j := range skNew.Value.Q.Coeffs[i] {
+					if skNew.Value.Q.Coeffs[i][j] != clientCTX.sk.Value.Q.Coeffs[i][j] {
+						isOk = false
+						break
+					}
+				}
+			}
+			if isOk {
+				fmt.Println("SK 복구 성공")
+			} else {
+				fmt.Println("SK 복구 실패")
+			}
+		}
+
+		fmt.Println("값 비교")
+		{
+			values := make([]complex128, params.MaxSlots())
+			for i := range values {
+				values[i] = sampling.RandComplex128(-1, 1)
+			}
+			pt := hefloat.NewPlaintext(params, params.MaxLevel())
+			encoder.Encode(values, pt)
+			ct, _ := encryptor.EncryptNew(pt)
+
+			values_OriginSK := make([]complex128, params.MaxSlots())
+			if err := encoder.Decode(pt, values_OriginSK); err != nil {
+				panic(err)
+			}
+
+			// ringQ := params.RingQ()
+			// pt.Resize(0, 0)
+			// ringQ.AtLevel(0).MulCoeffsMontgomery(ct.Value[1], sk.Value.Q, pt.Value)
+			// ringQ.AtLevel(0).Add(ct.Value[0], pt.Value, pt.Value)
+			decryptor_New := rlwe.NewDecryptor(params, skNew)
+			pt = decryptor_New.DecryptNew(ct)
+
+			values_NewSK := make([]complex128, params.MaxSlots())
+			if err := encoder.Decode(pt, values_NewSK); err != nil {
+				panic(err)
+			}
+
+			maxerr := float64(0)
+			for i := range values_NewSK {
+				err := cmplx.Abs(values_NewSK[i] - values_OriginSK[i])
+				if err > maxerr {
+					maxerr = err
 				}
 			}
 
-			for j := range polysCRT[i].P.Coeffs {
-				for k := range polysCRT[i].P.Coeffs[j] {
-					polysCRT[i].P.Coeffs[j][k] = sampling.RandUint64() % ringQP.RingP.ModuliChain()[j]
-				}
-			}
+			fmt.Println("Compare With Decrypt By Origin SK vs New SK")
+			fmt.Println("max-bit-precision", -math.Log2(maxerr))
 		}
-
-		polysCRT[partyNum-1] = *authCTX.sk.Value.CopyNew()
-		for i := range partyNum - 1 {
-			ringQP.Sub(polysCRT[partyNum-1], polysCRT[i], polysCRT[partyNum-1])
-			ringQP.Reduce(polysCRT[partyNum-1], polysCRT[partyNum-1])
-		}
-
-		// Normal form (Mform, NTTform 둘다 아님)으로 저장합니다. 굳이 필요없으면 주석 처리해도 됩니다. 다만, verification check할 때 비교대상도 Normal form으로 만들어야 합니다.
-		for i := range partyNum {
-			ringQP.IMForm(polysCRT[i], polysCRT[i])
-			//ringQP.INTT(polysCRT[i], polysCRT[i])
-		}
-		// coefficient form에서 CRT merge
-
-		coef := make([]uint64, len(moduli))
-		for i := range partyNum {
-			polysBigint[i] = make([]*big.Int, params.N())
-			for j := range params.N() {
-				for k := range polysCRT[i].Q.Coeffs {
-					coef[k] = polysCRT[i].Q.Coeffs[k][j]
-				}
-				for k := range polysCRT[i].P.Coeffs {
-					coef[len(params.Q())+k] = polysCRT[i].P.Coeffs[k][j]
-				}
-
-				polysBigint[i][j], _, _ = crt.CRTUint64(coef, moduli)
-			}
-		}
-	}
-
-	// ######## sk share verification check (SUM == sk_auth??) ######
-	{
-		polystemp := make([]*big.Int, params.N())
-		for i := range polystemp {
-			polystemp[i] = big.NewInt(0)
-		}
-
-		coef := make([]uint64, len(moduli))
-		polyCRT := ringQP.NewPoly()
-		for i := range params.N() {
-			for j := range partyNum {
-				polystemp[i] = new(big.Int).Add(polystemp[i], polysBigint[j][i])
-			}
-			copy(coef, ringQP.RingQ.NewRNSScalarFromBigint(polystemp[i]))
-			copy(coef[len(params.Q()):], ringQP.RingP.NewRNSScalarFromBigint(polystemp[i]))
-
-			for j := range polyCRT.Q.Coeffs {
-				polyCRT.Q.Coeffs[j][i] = coef[j]
-			}
-			for j := range polyCRT.P.Coeffs {
-				polyCRT.P.Coeffs[j][i] = coef[len(params.Q())+j]
-			}
-		}
-		sktemp := *authCTX.sk.Value.CopyNew()
-		// Normal form으로 만들어서 비교합니다. (위에 주석 처리했다면 여기도 주석처리해야 verification check 통과할 수 있습니다.)
-		ringQP.IMForm(sktemp, sktemp)
-		//ringQP.INTT(sktemp, sktemp)
-
-		isOK := true
-		for i := range sktemp.Q.Coeffs {
-			for j := range sktemp.Q.Coeffs[i] {
-				if sktemp.Q.Coeffs[i][j] != polyCRT.Q.Coeffs[i][j] {
-					isOK = false
-					break
-				}
-			}
-		}
-		for i := range sktemp.P.Coeffs {
-			for j := range sktemp.P.Coeffs[i] {
-				if sktemp.P.Coeffs[i][j] != polyCRT.P.Coeffs[i][j] {
-					isOK = false
-					break
-				}
-			}
-		}
-
-		if isOK {
-			fmt.Println("SK share 생성 성공")
-		} else {
-			fmt.Println("SK share 생성 실패")
-		}
-		fmt.Println()
-	}
-	// TODO End
-
-	skNew := SecRes(pubCTX, authCTX, partyNum)
-
-	fmt.Println("키 직접 비교")
-	{
-		isOk := true
-		for i := range skNew.Value.Q.Coeffs {
-			for j := range skNew.Value.Q.Coeffs[i] {
-				if skNew.Value.Q.Coeffs[i][j] != clientCTX.sk.Value.Q.Coeffs[i][j] {
-					isOk = false
-					break
-				}
-			}
-		}
-		if isOk {
-			fmt.Println("SK 복구 성공")
-		} else {
-			fmt.Println("SK 복구 실패")
-		}
-	}
-
-	fmt.Println("값 비교")
-	{
-		values := make([]complex128, params.MaxSlots())
-		for i := range values {
-			values[i] = sampling.RandComplex128(-1, 1)
-		}
-		pt := hefloat.NewPlaintext(params, params.MaxLevel())
-		encoder.Encode(values, pt)
-		ct, _ := encryptor.EncryptNew(pt)
-
-		values_OriginSK := make([]complex128, params.MaxSlots())
-		if err := encoder.Decode(pt, values_OriginSK); err != nil {
-			panic(err)
-		}
-
-		// ringQ := params.RingQ()
-		// pt.Resize(0, 0)
-		// ringQ.AtLevel(0).MulCoeffsMontgomery(ct.Value[1], sk.Value.Q, pt.Value)
-		// ringQ.AtLevel(0).Add(ct.Value[0], pt.Value, pt.Value)
-		decryptor_New := rlwe.NewDecryptor(params, skNew)
-		pt = decryptor_New.DecryptNew(ct)
-
-		values_NewSK := make([]complex128, params.MaxSlots())
-		if err := encoder.Decode(pt, values_NewSK); err != nil {
-			panic(err)
-		}
-
-		maxerr := float64(0)
-		for i := range values_NewSK {
-			err := cmplx.Abs(values_NewSK[i] - values_OriginSK[i])
-			if err > maxerr {
-				maxerr = err
-			}
-		}
-
-		fmt.Println("Compare With Decrypt By Origin SK vs New SK")
-		fmt.Println("max-bit-precision", -math.Log2(maxerr))
 	}
 
 }

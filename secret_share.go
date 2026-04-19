@@ -746,7 +746,7 @@ func reverseBits(x uint32, bitLen int) uint32 {
 	return res
 }
 
-// LocalNegacyclicNTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 수론적 변환
+// LocalNegacyclicNTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 수론적 변환 (순차 실행)
 func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int, moduli []uint64) ([][]AdditiveShare, error) {
 	logN := 0
 	for (1 << logN) < N {
@@ -756,177 +756,120 @@ func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, mod
 		return nil, fmt.Errorf("NTT를 위해 N은 2의 거듭제곱이어야 합니다")
 	}
 
-	Q, err := computeQ(modulus)
-	if err != nil {
-		return nil, err
-	}
-
-	// 🚀 핵심: Negacyclic NTT는 N번째가 아닌 2N번째 원시 거듭제곱근(psi)이 필요합니다.
-	psi, err := findPrimitiveRootCRT(modulus, 2*N)
-	if err != nil {
-		return nil, fmt.Errorf("2N번째 원시 거듭제곱근 psi를 찾을 수 없습니다: %v", err)
-	}
-
-	// omega = psi^2 mod Q (기존 N번째 거듭제곱근 역할)
-	omega := new(big.Int).Mul(psi, psi)
-	omega.Mod(omega, Q)
-
-	// 최적화: psi의 거듭제곱을 미리 계산하여 읽기 전용으로 공유
-	psiPowers := make([]*big.Int, N)
-	psiPowers[0] = big.NewInt(1)
-	for i := 1; i < N; i++ {
-		psiPowers[i] = new(big.Int).Mul(psiPowers[i-1], psi)
-		psiPowers[i].Mod(psiPowers[i], Q)
-	}
-
 	numParties := s.NumParties
 	allRes := make([][]AdditiveShare, numParties)
-	var wg sync.WaitGroup
 
 	for i := 0; i < numParties; i++ {
-		wg.Add(1)
-		go func(pIdx int) {
-			defer wg.Done()
+		t := time.Now()
+		// moduli 복사 및 유효성 체크
+		currentModuli := make([]uint64, len(moduli))
+		copy(currentModuli, moduli)
 
-			var moduli_temp []uint64
-			copy(moduli_temp, moduli)
+		shares := parties[i].InputShares[xIdx]
+		M := shares[0].Modulus
 
-			shares := parties[pIdx].InputShares[xIdx]
-			res := make([]AdditiveShare, N)
-
-			//TODO bignum -> CRT -> NTT -> bitnum
-			{
-				M := shares[0].Modulus
-
-				for i := range moduli {
-					if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[i])).Cmp(big.NewInt(0)) != 0 {
-						moduli_temp = moduli[:i]
-						break
-					}
-				}
-
-				r, _ := ring.NewRing(N, moduli_temp)
-				poly := r.NewPoly()
-				for i := range N {
-					rns := r.NewRNSScalarFromBigint(shares[i].Value)
-					for j := range rns {
-						poly.Coeffs[j][i] = rns[j]
-					}
-				}
-
-				r.NTT(poly, poly)
-
-				for i := range N {
-					coef := make([]uint64, len(moduli_temp))
-					for j := range len(r.ModuliChain()) {
-						coef[j] = poly.Coeffs[j][i]
-					}
-					res[i].Value, _, _ = crt.CRTUint64(coef, moduli_temp)
-					res[i].Modulus = M
-				}
+		// 현재 공유된 Modulus M에 맞는 moduli 체인 필터링
+		for j := range moduli {
+			if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[j])).Cmp(big.NewInt(0)) != 0 {
+				currentModuli = currentModuli[:j]
+				break
 			}
-			// 결과 저장
-			for len(parties[pIdx].InputShares) <= returnIdx {
-				parties[pIdx].InputShares = append(parties[pIdx].InputShares, nil)
-			}
-			parties[pIdx].InputShares[returnIdx] = res
-			allRes[pIdx] = res
+		}
 
-		}(i)
+		// RNS 및 Ring 설정
+		r, err := ring.NewRing(N, currentModuli)
+		if err != nil {
+			return nil, err
+		}
+
+		poly := r.NewPoly()
+		for j := 0; j < N; j++ {
+			rns := r.NewRNSScalarFromBigint(shares[j].Value)
+			for k := range rns {
+				poly.Coeffs[k][j] = rns[k]
+			}
+		}
+
+		// NTT 수행
+		r.NTT(poly, poly)
+
+		// NTT 결과를 다시 AdditiveShare로 변환
+		res := make([]AdditiveShare, N)
+		for j := 0; j < N; j++ {
+			coef := make([]uint64, len(r.ModuliChain()))
+			for k := range r.ModuliChain() {
+				coef[k] = poly.Coeffs[k][j]
+			}
+			val, _, _ := crt.CRTUint64(coef, currentModuli)
+			res[j] = AdditiveShare{Value: val, Modulus: M}
+		}
+
+		// 결과 저장 (InputShares 공간 확보 및 할당)
+		for len(parties[i].InputShares) <= returnIdx {
+			parties[i].InputShares = append(parties[i].InputShares, nil)
+		}
+		parties[i].InputShares[returnIdx] = res
+		allRes[i] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 
-	wg.Wait()
 	return allRes, nil
 }
 
-// LocalNegacyclicINTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 역 수론적 변환
+// LocalNegacyclicINTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 역 수론적 변환 (순차 실행)
 func (s *SecretSharingScheme) LocalNegacyclicINTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int, moduli []uint64) ([][]AdditiveShare, error) {
-	logN := 0
-	for (1 << logN) < N {
-		logN++
-	}
-
-	Q, err := computeQ(modulus)
-	if err != nil {
-		return nil, err
-	}
-
-	psi, err := findPrimitiveRootCRT(modulus, 2*N)
-	if err != nil {
-		return nil, err
-	}
-	omega := new(big.Int).Mul(psi, psi)
-	omega.Mod(omega, Q)
-
-	// INTT 필요 요소: psi^-1, omega^-1, N^-1
-	psiInv := new(big.Int).ModInverse(psi, Q)
-	omegaInv := new(big.Int).ModInverse(omega, Q)
-	NInv := new(big.Int).ModInverse(big.NewInt(int64(N)), Q)
-	if psiInv == nil || omegaInv == nil || NInv == nil {
-		return nil, fmt.Errorf("역원 계산 실패")
-	}
-
-	// 최적화: psiInv의 거듭제곱 미리 계산
-	psiInvPowers := make([]*big.Int, N)
-	psiInvPowers[0] = big.NewInt(1)
-	for i := 1; i < N; i++ {
-		psiInvPowers[i] = new(big.Int).Mul(psiInvPowers[i-1], psiInv)
-		psiInvPowers[i].Mod(psiInvPowers[i], Q)
-	}
-
 	numParties := s.NumParties
 	allRes := make([][]AdditiveShare, numParties)
-	var wg sync.WaitGroup
 
 	for i := 0; i < numParties; i++ {
-		wg.Add(1)
-		go func(pIdx int) {
-			defer wg.Done()
+		t := time.Now()
+		shares := parties[i].InputShares[xIdx]
+		M := shares[0].Modulus
 
-			shares := parties[pIdx].InputShares[xIdx]
-			res := make([]AdditiveShare, N)
-
-			//TODO bignum -> CRT -> NTT -> bitnum
-			{
-				M := shares[0].Modulus
-				for i := range moduli {
-					if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[i])).Cmp(big.NewInt(0)) != 0 {
-						moduli = moduli[:i]
-						break
-					}
-				}
-
-				r, _ := ring.NewRing(N, moduli)
-				poly := r.NewPoly()
-				for i := range N {
-					rns := r.NewRNSScalarFromBigint(shares[i].Value)
-					for j := range rns {
-						poly.Coeffs[j][i] = rns[j]
-					}
-				}
-
-				r.INTT(poly, poly)
-
-				for i := range N {
-					coef := make([]uint64, len(moduli))
-					for j := range len(r.ModuliChain()) {
-						coef[j] = poly.Coeffs[j][i]
-					}
-					res[i].Value, _, _ = crt.CRTUint64(coef, moduli)
-					res[i].Modulus = M
-				}
+		// 유효한 moduli 체인 결정
+		currentModuli := make([]uint64, len(moduli))
+		copy(currentModuli, moduli)
+		for j := range moduli {
+			if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[j])).Cmp(big.NewInt(0)) != 0 {
+				currentModuli = currentModuli[:j]
+				break
 			}
+		}
 
-			for len(parties[pIdx].InputShares) <= returnIdx {
-				parties[pIdx].InputShares = append(parties[pIdx].InputShares, nil)
+		r, err := ring.NewRing(N, currentModuli)
+		if err != nil {
+			return nil, err
+		}
+
+		poly := r.NewPoly()
+		for j := 0; j < N; j++ {
+			rns := r.NewRNSScalarFromBigint(shares[j].Value)
+			for k := range rns {
+				poly.Coeffs[k][j] = rns[k]
 			}
-			parties[pIdx].InputShares[returnIdx] = res
-			allRes[pIdx] = res
+		}
 
-		}(i)
+		// INTT 수행
+		r.INTT(poly, poly)
+
+		res := make([]AdditiveShare, N)
+		for j := 0; j < N; j++ {
+			coef := make([]uint64, len(r.ModuliChain()))
+			for k := range r.ModuliChain() {
+				coef[k] = poly.Coeffs[k][j]
+			}
+			val, _, _ := crt.CRTUint64(coef, currentModuli)
+			res[j] = AdditiveShare{Value: val, Modulus: M}
+		}
+
+		for len(parties[i].InputShares) <= returnIdx {
+			parties[i].InputShares = append(parties[i].InputShares, nil)
+		}
+		parties[i].InputShares[returnIdx] = res
+		allRes[i] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 
-	wg.Wait()
 	return allRes, nil
 }
 
@@ -967,6 +910,7 @@ func (s *SecretSharingScheme) Inverse(parties []*Party, xIdx, rIdx, tripleIdx, r
 		mSharesAll[i] = parties[i].InputShares[resultIdx]
 	}
 	mPlain := s.Open(mSharesAll) // []*big.Int
+	s.CommunicationRounds -= 1
 
 	// 3. 로컬 역원 계산 및 마스킹 해제 (0 Round)
 	for i := 0; i < numParties; i++ {
@@ -1008,6 +952,7 @@ func PrintDebug(scheme *SecretSharingScheme, parties []*Party, numParties int, p
 	}
 
 	finalResult := scheme.Open(allResultShares)
+	scheme.CommunicationRounds -= 1
 
 	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
 	isVerbose := false
@@ -1092,6 +1037,7 @@ func PrintDebugQ0Q1(scheme *SecretSharingScheme, parties []*Party, numParties in
 	}
 
 	finalResult := scheme.Open(allResultShares)
+	scheme.CommunicationRounds -= 1
 
 	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
 	isVerbose := false
