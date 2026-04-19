@@ -18,6 +18,7 @@ import (
 	"github.com/tuneinsight/lattigo/v5/he/hefloat"
 	"github.com/tuneinsight/lattigo/v5/ring"
 	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
+	"github.com/tuneinsight/lattigo/v5/utils/bignum"
 	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
 
@@ -172,6 +173,10 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	b1 := *gk.Value[1][0][0].CopyNew()
 	sk_auth := *skAuth.Value.CopyNew()
 
+	ringQP.IMForm(b0, b0)
+	ringQP.IMForm(b1, b1)
+	ringQP.IMForm(sk_auth, sk_auth)
+
 	fmt.Printf("Gen b0 shares... ")
 	coef := make([]uint64, len(moduli))
 	b0polysBigint := make([]*big.Int, params.N())
@@ -241,66 +246,22 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 		PQ_big_big[i] = new(big.Int).SetUint64(PQ_big[i])
 	}
 
-	//scheme.LocalNegacyclicINTT(parties, 0, PQ_big_big, params.N(), 0)
-
 	// ######## step 1. b0 + b1 * skAuth ######
+
+	b0 = *gk.Value[0][0][0].CopyNew()
+	b1 = *gk.Value[1][0][0].CopyNew()
+	sk_auth = *skAuth.Value.CopyNew()
+
 	ringQP.MulCoeffsMontgomery(b1, skAuth.Value, b1)
 	ringQP.Add(b0, b1, b0)
 	ringQP.Reduce(b0, b0)
 	ringQP.IMForm(b0, b0)
-
-	// 6. 결과 복원 (Open) 및 검증
-	// 모든 참여자의 InputShares[2] (곱셈 결과)를 수집하여 Open 호출
-	resultIdx := 0
-	allResultShares := make([][]AdditiveShare, numParties)
-	for i := 0; i < numParties; i++ {
-		allResultShares[i] = parties[i].InputShares[resultIdx]
-	}
-
-	finalResult := scheme.Open(allResultShares)
-
-	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
-	isVerbose := false
-	allPassed := true
-
-	fmt.Println(len(b0.P.Coeffs[0]))
-
-	fmt.Println("\n--- 결과 검증 ---")
-	for i := 0; i < params.N(); i++ {
-		finalResult[i] = finalResult[i].Mod(finalResult[i], new(big.Int).SetUint64(params.Q()[0]))
-		expected := new(big.Int).SetUint64(b0.Q.Coeffs[0][i])
-
-		if isVerbose {
-			// 상세 출력 모드
-			fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected)
-
-		} else {
-			// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
-			diff := new(big.Int).Sub(finalResult[i], expected)
-			diff.Mod(diff, PQ)
-
-			if diff.Cmp(big.NewInt(0)) == 0 {
-				//fmt.Printf("계수 [%d]: PASS\n", i)
-			} else {
-				fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
-				allPassed = false
-				break // 하나라도 실패하면 중단
-			}
-		}
-	}
-
-	if !isVerbose && allPassed {
-		fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
-	} else if !allPassed {
-		fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
-	}
-
-	// 7. 통신 통계 출력
-	fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
-	fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
-	fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
+	//ringQP.INTT(b0, b0)
 
 	fmt.Println(" Done!")
+
+	//PrintDebug(scheme, parties, numParties, params, PQ, b0, 0)
+	//fmt.Println(Q_, P_)
 
 	fmt.Printf("Step 2... ")
 	var perLevel int
@@ -310,14 +271,8 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	}
 
 	Q0Q1level := perLevel * 2
+	fmt.Println("Q0Q1Level", Q0Q1level)
 	Q_ := params.Q()
-	// Q_ = append(Q_, params.P()...)
-	// Q_big := make([]*big.Int, len(Q_))
-	// for i := 0; i < len(Q_big); i++ {
-	// 	Q_big[i] = new(big.Int).SetUint64(Q_[i])
-	// }
-
-	//scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0)
 
 	Q_ = params.Q()
 	P_ := Q_[Q0Q1level:]
@@ -335,8 +290,8 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 		Q0Q1.Mul(Q0Q1, val)
 	}
 
-	P_mod := new(big.Int).ModInverse(new(big.Int).Mod(Pbig, Q0Q1), Q0Q1)
-
+	//P_mod := new(big.Int).ModInverse(new(big.Int).Mod(Pbig, Q0Q1), Q0Q1)
+	//fmt.Println(Pbig)
 	//fmt.Println(Q_)
 	//fmt.Println(P_)
 	for _, v := range P_ {
@@ -347,16 +302,45 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 		Pbig.Mul(Pbig, val)
 	}
 
-	scheme.Mod(parties, 0, Pbig, 1)
+	P_mod := new(big.Int).ModInverse(new(big.Int).Mod(Pbig, Q0Q1), Q0Q1)
+	fmt.Println("Q0Q1 : ", Q0Q1)
+	fmt.Println("P inv : ", P_mod)
+
+	N := params.N()
+	// Q_ : Q0Q1, P_ : Q2...Qdnum P
+	Q_ = params.Q()
+	P_ = Q_[Q0Q1level:]
+	for _, v := range params.P() {
+		P_ = append(P_, v)
+	}
+	Q_ = Q_[:Q0Q1level]
+	ringQ_, _ := ring.NewRing(N, Q_)
+	ringP_, _ := ring.NewRing(N, P_)
+	be := crt.NewBasisExtender(ringQ_, ringP_)
+	PHalf := bignum.NewInt(ringP_.ModulusAtLevel[ringP_.Level()])
+	PHalf.Rsh(PHalf, 1)
 
 	publicVals := make([]*big.Int, params.N())
+	for j := 0; j < params.N(); j++ {
+		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+		c := PHalf
+		publicVals[j] = c
+	}
 
+	scheme.LocalNegacyclicINTT(parties, 0, PQ_big_big, params.N(), 0, moduli)
+	scheme.AddPublic(parties, 0, publicVals, 0)
+
+	scheme.Mod(parties, 0, Pbig, 1)
+	//fmt.Println(Pbig)
+
+	publicVals = make([]*big.Int, params.N())
 	for j := 0; j < params.N(); j++ {
 		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
 		c := Pbig
 		publicVals[j] = c
 	}
 
+	//lognum := int(math.Floor(math.Log2(float64(num)))) + 1
 	for i := 0; i < num-1; i++ {
 		fmt.Printf("compare... ")
 		scheme.ComparePublicTree(parties, 1, publicVals, Pbig.BitLen(), 2, 3)
@@ -366,9 +350,12 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 		fmt.Println(" Done!")
 	}
 
+	//PrintDebug(scheme, parties, numParties, params, PQ, b0, 1)
 	scheme.Sub(parties, 0, 1, 0)
+
 	scheme.Modulus = Q0Q1
 	scheme.Mod(parties, 0, Q0Q1, 0)
+	//fmt.Println(Q0Q1, parties[0].InputShares[0][0].Modulus)
 
 	for j := 0; j < params.N(); j++ {
 		// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
@@ -382,7 +369,38 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 		Q_big[i] = new(big.Int).SetUint64(Q_[i])
 	}
 
-	scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0)
+	//scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0, moduli)
+
+	// publicVals = make([]*big.Int, params.N())
+	// for j := 0; j < params.N(); j++ {
+	// 	// x는 랜덤, c는 x보다 크거나 작도록 임의 설정
+	// 	c := new(big.Int).Mod(PHalf.Neg(PHalf), Q0Q1)
+	// 	publicVals[j] = c
+	// }
+	// scheme.AddPublic(parties, 0, publicVals, 0)
+
+	// ######## step 2. ModDown ######
+
+	//polQ_ : b0 mod Q0Q1, polP_ : b0 mod P
+	polQ_ := ringQ_.NewPoly()
+	polP_ := ringP_.NewPoly()
+	polres := ringQ_.NewPoly()
+	for i, v := range b0.Q.Coeffs[:Q0Q1level] {
+		copy(polQ_.Coeffs[i], v)
+	}
+	for i, v := range b0.Q.Coeffs[Q0Q1level:] {
+		copy(polP_.Coeffs[i], v)
+	}
+	for i, v := range polP_.Coeffs[len(params.Q())-Q0Q1level:] {
+		copy(v, b0.P.Coeffs[i])
+	}
+	be.ModDownQPtoQNTT(polQ_.Level(), polP_.Level(), polQ_, polP_, polres)
+	//ringQ_.INTT(polres, polres)
+	//ringQ_.IMForm(polres, polres)
+
+	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
+	// 6. 결과 복원 (Open) 및 검증
+
 	// scheme.GenerateRandomFieldShare(parties, 4)
 	// scheme.Inverse(parties, 0, 4, 0, 0)
 	//scheme.LocalNegacyclicNTT(parties, 0, Q_big, params.N(), 0)
@@ -420,105 +438,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 
 	scheme.AddPublic(parties, 1, publicVals, 1)
 
-	scheme.GenerateRandomFieldShare(parties, 4)
-	scheme.Inverse(parties, 1, 4, 0, 1)
 	//scheme.LocalNegacyclicNTT(parties, 1, Q_big, params.N(), 1)
-
-	scheme.Multiply(parties, 0, 1, 0, 0)
-	scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0)
-	fmt.Println(" Done!")
-
-	// // 6. 결과 복원 (Open) 및 검증
-	// // 모든 참여자의 InputShares[2] (곱셈 결과)를 수집하여 Open 호출
-	// resultIdx := 0
-	// allResultShares := make([][]AdditiveShare, numParties)
-	// for i := 0; i < numParties; i++ {
-	// 	allResultShares[i] = parties[i].InputShares[resultIdx]
-	// }
-
-	// finalResult := scheme.Open(allResultShares)
-
-	// // isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
-	// isVerbose := false
-	// allPassed := true
-
-	// fmt.Println("\n--- 결과 검증 ---")
-	// for i := 0; i < params.N(); i++ {
-	// 	// 1. 기대값 계산 (Expected = valX * valY mod M)
-	// 	expected := new(big.Int).Mul(b1polysBigint[i], skpolysBigint[i])
-	// 	expected.Mod(expected, PQ)
-	// 	expected = new(big.Int).Add(expected, b0polysBigint[i])
-	// 	temp := new(big.Int).Mod(expected, Pbig)
-	// 	expected = new(big.Int).Sub(expected, temp)
-	// 	expected = new(big.Int).Mod(expected, Q0Q1)
-	// 	expected = new(big.Int).Mul(expected, P_mod)
-	// 	expected = new(big.Int).Mod(expected, Q0Q1)
-	// 	//expected = new(big.Int).Mul(expected, expected)
-	// 	//expected = new(big.Int).Mod(expected, Q0Q1)
-	// 	expected = new(big.Int).ModInverse(expected, Q0Q1)
-	// 	expected = new(big.Int).Mod(expected, Q0Q1)
-
-	// 	if isVerbose {
-	// 		// 상세 출력 모드
-	// 		fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected.String())
-
-	// 	} else {
-	// 		// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
-	// 		diff := new(big.Int).Sub(finalResult[i], expected)
-	// 		diff.Mod(diff, PQ)
-
-	// 		if diff.Cmp(big.NewInt(0)) == 0 {
-	// 			//fmt.Printf("계수 [%d]: PASS\n", i)
-	// 		} else {
-	// 			fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
-	// 			allPassed = false
-	// 			break // 하나라도 실패하면 중단
-	// 		}
-	// 	}
-	// }
-
-	// if !isVerbose && allPassed {
-	// 	fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
-	// } else if !allPassed {
-	// 	fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
-	// }
-
-	// // 7. 통신 통계 출력
-	// fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
-	// fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
-	// fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
-
-	// ##########################################
-
-	// ######## step 2. ModDown ######
-	N := params.N()
-	// Q_ : Q0Q1, P_ : Q2...Qdnum P
-	Q_ = params.Q()
-	P_ = Q_[Q0Q1level:]
-	for _, v := range params.P() {
-		P_ = append(P_, v)
-	}
-	Q_ = Q_[:Q0Q1level]
-
-	//fmt.Println(Q_, P_)
-	ringQ_, _ := ring.NewRing(N, Q_)
-	ringP_, _ := ring.NewRing(N, P_)
-	be := crt.NewBasisExtender(ringQ_, ringP_)
-
-	//polQ_ : b0 mod Q0Q1, polP_ : b0 mod P
-	polQ_ := ringQ_.NewPoly()
-	polP_ := ringP_.NewPoly()
-	polres := ringQ_.NewPoly()
-	for i, v := range b0.Q.Coeffs[:Q0Q1level] {
-		copy(polQ_.Coeffs[i], v)
-	}
-	for i, v := range b0.Q.Coeffs[Q0Q1level:] {
-		copy(polP_.Coeffs[i], v)
-	}
-	for i, v := range polP_.Coeffs[len(params.Q())-Q0Q1level:] {
-		copy(v, b0.P.Coeffs[i])
-	}
-	be.ModDownQPtoQNTT(polQ_.Level(), polP_.Level(), polQ_, polP_, polres)
 
 	polskAuth := ringQ_.NewPoly()
 	for i, v := range skAuth.Value.Q.Coeffs[:Q0Q1level] {
@@ -543,6 +463,7 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	ringQ_.AddScalarBigint(polskAuth, t0, polskAuth)
 	ringQ_.MForm(polskAuth, polskAuth)
 	ringQ_.Reduce(polskAuth, polskAuth)
+	//ringQ_.IMForm(polskAuth, polskAuth)
 
 	// ######## step 4. compute inverse of Q1[Q0hat]^-1 + Q0[Q1hat]^-1 * skAuth ######
 	coef = make([]uint64, len(ringQ_.ModuliChain()))
@@ -555,8 +476,25 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 			polskAuth.Coeffs[i][j] = coef[i]
 		}
 	}
+
 	ringQ_.MulCoeffsMontgomery(polskAuth, polres, polres)
-	ringQ_.INTT(polres, polres)
+	//ringQ_.INTT(polres, polres)
+
+	scheme.GenerateRandomFieldShare(parties, 4)
+
+	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
+	scheme.Modulus = Q0Q1
+	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
+	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
+	scheme.Inverse(parties, 1, 4, 0, 1)
+	//fmt.Println("mod : ", parties[0].InputShares[1][0].Modulus)
+	//ringQ_.IMForm(polskAuth, polskAuth)
+	//PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polskAuth, 1)
+
+	scheme.Multiply(parties, 0, 1, 0, 0)
+	//scheme.LocalNegacyclicINTT(parties, 0, Q_big, params.N(), 0, moduli)
+	PrintDebugQ0Q1(scheme, parties, numParties, params, Q0Q1, polres, 0)
+	fmt.Println(" Done!")
 
 	// ######## step 5. ModUp(make poly to Secret Key Object) ######
 	polresP := ringP_.NewPoly()
@@ -582,10 +520,13 @@ func SecRes(pubCTX PublicSideContext, authCTX AuthSideContext, num int) *rlwe.Se
 	return sk
 }
 
+var TripleCount int
+
 func main() {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
+	TripleCount = 0
 	//Test_share()
 	//Test_ComparePublic_Workflow()
 	//Test_ComparePublicTree_Workflow()

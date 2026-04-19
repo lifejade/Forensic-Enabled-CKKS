@@ -52,11 +52,11 @@ func CRTUint64(residues, moduli []uint64) (*big.Int, *big.Int, error) {
 
 	// result ∈ [0, M)
 	result.Mod(result, M)
-	MHalf := new(big.Int).Rsh(M, uint(1))
-	// MHalf = MHalf.Sub(MHalf, result)
-	if result.Cmp(MHalf) == 1 {
-		result = result.Sub(result, M)
-	}
+	// MHalf := new(big.Int).Rsh(M, uint(1))
+	// // MHalf = MHalf.Sub(MHalf, result)
+	// if result.Cmp(MHalf) == 1 {
+	// 	result = result.Sub(result, M)
+	// }
 
 	return result, M, nil
 }

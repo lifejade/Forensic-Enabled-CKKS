@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"fmt"
 	"math/big"
 	"time"
 )
@@ -209,6 +208,7 @@ func (s *SecretSharingScheme) BitANDBatch(parties []*Party, pairs []AndPairBatch
 		//tripleIdx := startTripleIdx + k
 
 		for i := 0; i < numParties; i++ {
+			t := time.Now()
 			dSharesAll[k][i] = make([]AdditiveShare, numCoeffs)
 			eSharesAll[k][i] = make([]AdditiveShare, numCoeffs)
 			triple := parties[i].BeaverTriple[0]
@@ -219,6 +219,7 @@ func (s *SecretSharingScheme) BitANDBatch(parties []*Party, pairs []AndPairBatch
 				dSharesAll[k][i][j] = AdditiveShare{Value: dV.Mod(dV, s.Modulus), Modulus: s.Modulus}
 				eSharesAll[k][i][j] = AdditiveShare{Value: eV.Mod(eV, s.Modulus), Modulus: s.Modulus}
 			}
+			parties[i].LocalTime += time.Since(t)
 		}
 	}
 
@@ -238,8 +239,10 @@ func (s *SecretSharingScheme) BitANDBatch(parties []*Party, pairs []AndPairBatch
 
 		resAll := make([][]AdditiveShare, numParties)
 		for i := 0; i < numParties; i++ {
+			t := time.Now()
 			triple := parties[i].BeaverTriple[0]
 			resAll[i] = s.ComputeFinalShare(i, dPlain, ePlain, triple)
+			parties[i].LocalTime += time.Since(t)
 		}
 		results[k] = resAll
 	}
@@ -261,11 +264,13 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 	s.GenerateRandomBitVariable(parties, bitLen, tmpRandIdx)
 	dSharesAll := make([][]AdditiveShare, numParties)
 	for i := 0; i < numParties; i++ {
+		t := time.Now()
 		dSharesAll[i] = make([]AdditiveShare, numCoeffs)
 		for j := 0; j < numCoeffs; j++ {
 			sum := new(big.Int).Add(parties[i].InputShares[xIdx][j].Value, parties[i].InputShares[tmpRandIdx][j].Value)
 			dSharesAll[i][j] = AdditiveShare{Value: sum.Mod(sum, s.Modulus), Modulus: s.Modulus}
 		}
+		parties[i].LocalTime += time.Since(t)
 	}
 	dPlain := s.Open(dSharesAll)
 
@@ -275,7 +280,6 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 		cPrimeVals[j] = new(big.Int).Sub(dPlain[j], publicVals[j])
 	}
 
-	compare_time := time.Now()
 	// 3. Level 0 단말 노드 초기화
 	var nodes []CompareNode
 	for bit := 0; bit < bitLen; bit++ {
@@ -283,6 +287,7 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 		P_bit := make([][]AdditiveShare, numParties)
 
 		for p := 0; p < numParties; p++ {
+			t := time.Now()
 			G_bit[p] = make([]AdditiveShare, numCoeffs)
 			P_bit[p] = make([]AdditiveShare, numCoeffs)
 
@@ -308,6 +313,7 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 					P_bit[p][j] = AdditiveShare{Value: new(big.Int).Set(r_ij), Modulus: s.Modulus}
 				}
 			}
+			parties[p].LocalTime += time.Since(t)
 		}
 		nodes = append(nodes, CompareNode{G: G_bit, P: P_bit})
 	}
@@ -325,6 +331,7 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 			batchPairs = append(batchPairs, AndPairBatch{X: L.P, Y: R.P})
 		}
 
+		TripleCount += 1
 		mulResults := s.BitANDBatch(parties, batchPairs, tripleIdx)
 		tripleIdx += len(batchPairs)
 
@@ -336,11 +343,13 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 
 			G_new := make([][]AdditiveShare, numParties)
 			for p := 0; p < numParties; p++ {
+				t := time.Now()
 				G_new[p] = make([]AdditiveShare, numCoeffs)
 				for j := 0; j < numCoeffs; j++ {
 					v := new(big.Int).Add(L.G[p][j].Value, termPG[p][j].Value)
 					G_new[p][j] = AdditiveShare{Value: v.Mod(v, s.Modulus), Modulus: s.Modulus}
 				}
+				parties[p].LocalTime += time.Since(t)
 			}
 			nextNodes = append(nextNodes, CompareNode{G: G_new, P: termPP})
 		}
@@ -353,6 +362,7 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 
 	// 🚀 5. 최종 결과 산출 및 반전 (X >= C 조건 적용)
 	for p := 0; p < numParties; p++ {
+		t := time.Now()
 		for len(parties[p].InputShares) <= resultIdx {
 			parties[p].InputShares = append(parties[p].InputShares, nil)
 		}
@@ -380,9 +390,8 @@ func (s *SecretSharingScheme) ComparePublicTree(parties []*Party, xIdx int, publ
 			}
 		}
 		parties[p].InputShares[resultIdx] = finalRes
+		parties[p].LocalTime += time.Since(t)
 	}
-
-	fmt.Println(time.Since(compare_time))
 
 	return parties
 }

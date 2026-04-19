@@ -8,6 +8,10 @@ import (
 	"sync"
 	"tifs/src/crt"
 	"time"
+
+	"github.com/tuneinsight/lattigo/v5/he/hefloat"
+	"github.com/tuneinsight/lattigo/v5/ring"
+	"github.com/tuneinsight/lattigo/v5/ring/ringqp"
 )
 
 type AdditiveShare struct {
@@ -25,6 +29,7 @@ type Party struct {
 	InputShares  [][]AdditiveShare   // [Variable ID][Coefficient]
 	BitShares    [][]BitShares       // [Variable ID][Bit Index][Coefficient]
 	BeaverTriple [][][]AdditiveShare // [Triple ID][ABC(0:a, 1:b, 2:c)][Coefficient]
+	LocalTime    time.Duration
 }
 type SecretSharingScheme struct {
 	Modulus             *big.Int
@@ -246,6 +251,7 @@ func (s *SecretSharingScheme) AddLocal(shares1, shares2 []AdditiveShare) []Addit
 func (s *SecretSharingScheme) Add(parties []*Party, xIdx, yIdx, resultIdx int) []*Party {
 	for i := 0; i < s.NumParties; i++ {
 		// 로컬 덧셈 수행
+		t := time.Now()
 		res := s.AddLocal(parties[i].InputShares[xIdx], parties[i].InputShares[yIdx])
 
 		// 지정된 resultIdx까지 공간 확보
@@ -255,6 +261,7 @@ func (s *SecretSharingScheme) Add(parties []*Party, xIdx, yIdx, resultIdx int) [
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 	return parties
 }
@@ -275,6 +282,7 @@ func (s *SecretSharingScheme) AddPublic(parties []*Party, xIdx int, publicVals [
 
 	for i := 0; i < numParties; i++ {
 		res := make([]AdditiveShare, numCoeffs)
+		t := time.Now()
 		for j := 0; j < numCoeffs; j++ {
 			// 원본 쉐어 값을 안전하게 복사 (포인터 오염 방지)
 			val := new(big.Int).Set(parties[i].InputShares[xIdx][j].Value)
@@ -296,6 +304,7 @@ func (s *SecretSharingScheme) AddPublic(parties []*Party, xIdx int, publicVals [
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 
 	return parties
@@ -326,6 +335,7 @@ func (s *SecretSharingScheme) SubLocal(shares1, shares2 []AdditiveShare) []Addit
 func (s *SecretSharingScheme) Sub(parties []*Party, xIdx, yIdx, resultIdx int) []*Party {
 	for i := 0; i < s.NumParties; i++ {
 		// 로컬 뺄셈 수행
+		t := time.Now()
 		res := s.SubLocal(parties[i].InputShares[xIdx], parties[i].InputShares[yIdx])
 
 		// 지정된 resultIdx까지 공간 확보
@@ -335,6 +345,7 @@ func (s *SecretSharingScheme) Sub(parties []*Party, xIdx, yIdx, resultIdx int) [
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 	return parties
 }
@@ -384,13 +395,17 @@ func (s *SecretSharingScheme) ComputeFinalShare(partyID int, d, e []*big.Int, tr
 
 // Multiply: Beaver Triple을 사용하여 곱셈을 수행하고 지정된 resultIdx에 결과를 저장
 func (s *SecretSharingScheme) Multiply(parties []*Party, xIdx, yIdx, tripleIdx, resultIdx int) []*Party {
+	TripleCount += 1
+
 	numParties := s.NumParties
 	dSharesAll := make([][]AdditiveShare, numParties)
 	eSharesAll := make([][]AdditiveShare, numParties)
 
 	// 1. Local Masking
 	for i := 0; i < numParties; i++ {
+		t := time.Now()
 		dSharesAll[i], eSharesAll[i] = s.MultiplyLocal(parties[i], xIdx, yIdx, tripleIdx)
+		parties[i].LocalTime += time.Since(t)
 	}
 
 	// 2. Open (1 Round)
@@ -399,6 +414,7 @@ func (s *SecretSharingScheme) Multiply(parties []*Party, xIdx, yIdx, tripleIdx, 
 
 	// 3. Final Computation & State Update
 	for i := 0; i < numParties; i++ {
+		t := time.Now()
 		triple := parties[i].BeaverTriple[tripleIdx]
 		res := s.ComputeFinalShare(i, dPlain, ePlain, triple)
 
@@ -409,6 +425,7 @@ func (s *SecretSharingScheme) Multiply(parties []*Party, xIdx, yIdx, tripleIdx, 
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 	return parties
 }
@@ -428,6 +445,7 @@ func (s *SecretSharingScheme) MultiplyPublic(parties []*Party, xIdx int, publicV
 	}
 
 	for i := 0; i < numParties; i++ {
+		t := time.Now()
 		res := make([]AdditiveShare, numCoeffs)
 		for j := 0; j < numCoeffs; j++ {
 			// [x] * publicVal 계산 (로컬 스칼라 곱셈)
@@ -444,6 +462,7 @@ func (s *SecretSharingScheme) MultiplyPublic(parties []*Party, xIdx int, publicV
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 
 	return parties
@@ -473,6 +492,7 @@ func (s *SecretSharingScheme) ModLocal(shares1 []AdditiveShare, mod *big.Int) []
 func (s *SecretSharingScheme) Mod(parties []*Party, xIdx int, mod *big.Int, resultIdx int) []*Party {
 	for i := 0; i < s.NumParties; i++ {
 		// 로컬 덧셈 수행
+		t := time.Now()
 		res := s.ModLocal(parties[i].InputShares[xIdx], mod)
 
 		// 지정된 resultIdx까지 공간 확보
@@ -482,6 +502,8 @@ func (s *SecretSharingScheme) Mod(parties []*Party, xIdx int, mod *big.Int, resu
 
 		// 해당 인덱스에 결과 저장
 		parties[i].InputShares[resultIdx] = res
+
+		parties[i].LocalTime += time.Since(t)
 	}
 	return parties
 }
@@ -493,6 +515,7 @@ func (s *SecretSharingScheme) ConditionalSubPublic(parties []*Party, xIdx int, p
 	numCoeffs := s.Degree + 1
 
 	for i := 0; i < numParties; i++ {
+		t := time.Now()
 		res := make([]AdditiveShare, numCoeffs)
 		for j := 0; j < numCoeffs; j++ {
 			// 1. [cond] * publicVal 계산 (로컬 스칼라 곱셈)
@@ -509,6 +532,7 @@ func (s *SecretSharingScheme) ConditionalSubPublic(parties []*Party, xIdx int, p
 			parties[i].InputShares = append(parties[i].InputShares, nil)
 		}
 		parties[i].InputShares[resultIdx] = res
+		parties[i].LocalTime += time.Since(t)
 	}
 
 	return parties
@@ -723,7 +747,7 @@ func reverseBits(x uint32, bitLen int) uint32 {
 }
 
 // LocalNegacyclicNTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 수론적 변환
-func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int) ([][]AdditiveShare, error) {
+func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int, moduli []uint64) ([][]AdditiveShare, error) {
 	logN := 0
 	for (1 << logN) < N {
 		logN++
@@ -764,41 +788,43 @@ func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, mod
 		go func(pIdx int) {
 			defer wg.Done()
 
+			var moduli_temp []uint64
+			copy(moduli_temp, moduli)
+
 			shares := parties[pIdx].InputShares[xIdx]
 			res := make([]AdditiveShare, N)
 
-			// 1. Pre-multiplication & Bit-Reversal 병합 (O(N))
-			for k := 0; k < N; k++ {
-				rev := reverseBits(uint32(k), logN)
+			//TODO bignum -> CRT -> NTT -> bitnum
+			{
+				M := shares[0].Modulus
 
-				// u = shares[k] * psi^k mod Q
-				u := new(big.Int).Mul(shares[k].Value, psiPowers[k])
-				u.Mod(u, Q)
-
-				res[rev] = AdditiveShare{Value: u, Modulus: Q}
-			}
-
-			// 2. 표준 Cooley-Tukey 나비 연산 (O(N log N), omega 사용)
-			for length := 2; length <= N; length <<= 1 {
-				halfLen := length / 2
-				exp := big.NewInt(int64(N / length))
-				omegaLen := new(big.Int).Exp(omega, exp, Q)
-
-				for start := 0; start < N; start += length {
-					w := big.NewInt(1)
-					for j := 0; j < halfLen; j++ {
-						u := new(big.Int).Set(res[start+j].Value)
-						v := new(big.Int).Mul(res[start+j+halfLen].Value, w)
-						v.Mod(v, Q)
-
-						res[start+j].Value.Add(u, v).Mod(res[start+j].Value, Q)
-						res[start+j+halfLen].Value.Sub(u, v).Mod(res[start+j+halfLen].Value, Q)
-
-						w.Mul(w, omegaLen).Mod(w, Q)
+				for i := range moduli {
+					if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[i])).Cmp(big.NewInt(0)) != 0 {
+						moduli_temp = moduli[:i]
+						break
 					}
 				}
-			}
 
+				r, _ := ring.NewRing(N, moduli_temp)
+				poly := r.NewPoly()
+				for i := range N {
+					rns := r.NewRNSScalarFromBigint(shares[i].Value)
+					for j := range rns {
+						poly.Coeffs[j][i] = rns[j]
+					}
+				}
+
+				r.NTT(poly, poly)
+
+				for i := range N {
+					coef := make([]uint64, len(moduli_temp))
+					for j := range len(r.ModuliChain()) {
+						coef[j] = poly.Coeffs[j][i]
+					}
+					res[i].Value, _, _ = crt.CRTUint64(coef, moduli_temp)
+					res[i].Modulus = M
+				}
+			}
 			// 결과 저장
 			for len(parties[pIdx].InputShares) <= returnIdx {
 				parties[pIdx].InputShares = append(parties[pIdx].InputShares, nil)
@@ -814,7 +840,7 @@ func (s *SecretSharingScheme) LocalNegacyclicNTT(parties []*Party, xIdx int, mod
 }
 
 // LocalNegacyclicINTT: Z_Q[x]/(x^N + 1) 환에 대한 O(N log N) 고속 로컬 역 수론적 변환
-func (s *SecretSharingScheme) LocalNegacyclicINTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int) ([][]AdditiveShare, error) {
+func (s *SecretSharingScheme) LocalNegacyclicINTT(parties []*Party, xIdx int, modulus []*big.Int, N int, returnIdx int, moduli []uint64) ([][]AdditiveShare, error) {
 	logN := 0
 	for (1 << logN) < N {
 		logN++
@@ -860,43 +886,35 @@ func (s *SecretSharingScheme) LocalNegacyclicINTT(parties []*Party, xIdx int, mo
 			shares := parties[pIdx].InputShares[xIdx]
 			res := make([]AdditiveShare, N)
 
-			// 1. Bit-Reversal Permutation
-			for k := 0; k < N; k++ {
-				rev := reverseBits(uint32(k), logN)
-				res[rev] = AdditiveShare{
-					Value:   new(big.Int).Set(shares[k].Value),
-					Modulus: Q,
-				}
-			}
-
-			// 2. 나비 연산 (omegaInv 사용)
-			for length := 2; length <= N; length <<= 1 {
-				halfLen := length / 2
-				exp := big.NewInt(int64(N / length))
-				omegaInvLen := new(big.Int).Exp(omegaInv, exp, Q)
-
-				for start := 0; start < N; start += length {
-					w := big.NewInt(1)
-					for j := 0; j < halfLen; j++ {
-						u := new(big.Int).Set(res[start+j].Value)
-						v := new(big.Int).Mul(res[start+j+halfLen].Value, w)
-						v.Mod(v, Q)
-
-						res[start+j].Value.Add(u, v).Mod(res[start+j].Value, Q)
-						res[start+j+halfLen].Value.Sub(u, v).Mod(res[start+j+halfLen].Value, Q)
-
-						w.Mul(w, omegaInvLen).Mod(w, Q)
+			//TODO bignum -> CRT -> NTT -> bitnum
+			{
+				M := shares[0].Modulus
+				for i := range moduli {
+					if new(big.Int).Mod(M, new(big.Int).SetUint64(moduli[i])).Cmp(big.NewInt(0)) != 0 {
+						moduli = moduli[:i]
+						break
 					}
 				}
-			}
 
-			// 3. Post-multiplication & N^-1 스케일링 병합 (O(N))
-			for k := 0; k < N; k++ {
-				// res[k] = res[k] * NInv * psiInv^k mod Q
-				res[k].Value.Mul(res[k].Value, NInv)
-				res[k].Value.Mod(res[k].Value, Q)
-				res[k].Value.Mul(res[k].Value, psiInvPowers[k])
-				res[k].Value.Mod(res[k].Value, Q)
+				r, _ := ring.NewRing(N, moduli)
+				poly := r.NewPoly()
+				for i := range N {
+					rns := r.NewRNSScalarFromBigint(shares[i].Value)
+					for j := range rns {
+						poly.Coeffs[j][i] = rns[j]
+					}
+				}
+
+				r.INTT(poly, poly)
+
+				for i := range N {
+					coef := make([]uint64, len(moduli))
+					for j := range len(r.ModuliChain()) {
+						coef[j] = poly.Coeffs[j][i]
+					}
+					res[i].Value, _, _ = crt.CRTUint64(coef, moduli)
+					res[i].Modulus = M
+				}
 			}
 
 			for len(parties[pIdx].InputShares) <= returnIdx {
@@ -938,39 +956,205 @@ func (s *SecretSharingScheme) GenerateRandomFieldShare(parties []*Party, targetI
 
 // Inverse: 마스킹 기법을 사용하여 비밀 쉐어 [x]의 역원 [x^-1]을 계산
 func (s *SecretSharingScheme) Inverse(parties []*Party, xIdx, rIdx, tripleIdx, resultIdx int) []*Party {
-	numParties := s.NumParties
-	numCoeffs := s.Degree + 1
-
-	// 1. 마스킹 곱셈 수행: [m] = [x] * [r] (1 Round & 1 Triple 소모)
-	// 기존에 작성된 Multiply 함수를 사용하여 결과를 잠시 resultIdx에 저장합니다.
+	// 1. 마스킹 곱셈 수행: [m] = [x] * [r] (1 Round 소모)
+	// 결과 [m]은 임시로 resultIdx 위치에 저장됩니다.
 	s.Multiply(parties, xIdx, rIdx, tripleIdx, resultIdx)
 
-	// 2. 마스킹된 값 m을 모든 참여자에게 공개 (Open) (1 Round)
+	// 2. 마스킹된 값 m을 공개 (Open) (1 Round 소모)
+	numParties := s.NumParties
 	mSharesAll := make([][]AdditiveShare, numParties)
 	for i := 0; i < numParties; i++ {
 		mSharesAll[i] = parties[i].InputShares[resultIdx]
 	}
-	mPlain := s.Open(mSharesAll)
+	mPlain := s.Open(mSharesAll) // []*big.Int
 
-	// 3. 로컬 역원 계산 및 마스킹 해제: [res] = m^-1 * [r] (0 Round)
+	// 3. 로컬 역원 계산 및 마스킹 해제 (0 Round)
 	for i := 0; i < numParties; i++ {
-		res := make([]AdditiveShare, numCoeffs)
+		startTime := time.Now()
+		numCoeffs := len(mPlain)
+		invResult := make([]AdditiveShare, numCoeffs)
 
 		for j := 0; j < numCoeffs; j++ {
-			// 공개된 상수 m 의 역원 m^-1 mod Q 계산
+			// m^-1 mod Q 계산
 			mInv := new(big.Int).ModInverse(mPlain[j], s.Modulus)
 			if mInv == nil {
-				panic(fmt.Sprintf("Inverse 오류: 계수 %d에서 역원이 존재하지 않습니다 (x 또는 r이 0이거나 Q와 서로소가 아님)", j))
+				panic(fmt.Sprintf("Inverse 오류: 계수 %d에서 역원이 존재하지 않습니다.", j))
 			}
 
-			// [x^-1] = m^-1 * [r_i]
+			// [x^-1] = m^-1 * [r]
 			val := new(big.Int).Mul(mInv, parties[i].InputShares[rIdx][j].Value)
-			res[j] = AdditiveShare{Value: val.Mod(val, s.Modulus), Modulus: s.Modulus}
+
+			// 만약 몽고메리 폼을 사용 중이라면 여기에 보정 상수 R^2를 곱해야 함
+			// val.Mul(val, s.R2).Mod(val, s.Modulus)
+
+			invResult[j] = AdditiveShare{
+				Value:   val.Mod(val, s.Modulus),
+				Modulus: s.Modulus,
+			}
 		}
 
-		// 최종 결과 [x^-1] 덮어쓰기
-		parties[i].InputShares[resultIdx] = res
+		// 결과 저장
+		parties[i].InputShares[resultIdx] = invResult
+		parties[i].LocalTime += time.Since(startTime)
 	}
 
 	return parties
+}
+
+func PrintDebug(scheme *SecretSharingScheme, parties []*Party, numParties int, params hefloat.Parameters, mod *big.Int, polres ringqp.Poly, resultIdx int) {
+	allResultShares := make([][]AdditiveShare, numParties)
+	for i := 0; i < numParties; i++ {
+		allResultShares[i] = parties[i].InputShares[resultIdx]
+	}
+
+	finalResult := scheme.Open(allResultShares)
+
+	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
+	isVerbose := false
+	allPassed := true
+
+	moduli_PQ := params.Q()
+	moduli_PQ = append(moduli_PQ, params.P()...)
+	coef := make([]uint64, len(params.Q())+len(params.P()))
+	polysBigint := make([]*big.Int, params.N())
+	for j := range params.N() {
+		for k := range polres.Q.Coeffs {
+			coef[k] = polres.Q.Coeffs[k][j]
+		}
+		for k := range polres.P.Coeffs {
+			coef[len(params.Q())+k] = polres.P.Coeffs[k][j]
+		}
+
+		polysBigint[j], _, _ = crt.CRTUint64(coef, moduli_PQ)
+	}
+
+	Pbig := big.NewInt(1)
+	for i := 4; i < len(params.Q()); i++ {
+		Pbig = big.NewInt(1).Mul(big.NewInt(1), big.NewInt(1).SetUint64(params.Q()[i]))
+	}
+	for i := 0; i < len(params.P()); i++ {
+		Pbig = big.NewInt(1).Mul(big.NewInt(1), big.NewInt(1).SetUint64(params.P()[i]))
+	}
+	fmt.Println(Pbig)
+
+	fmt.Println("\n--- 결과 검증 ---")
+	for i := 0; i < params.N(); i++ {
+		expected := polysBigint[i].Mod(finalResult[i], Pbig)
+		fmt.Println(expected, finalResult[i])
+
+		if isVerbose {
+			// 상세 출력 모드
+			fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected)
+
+		} else {
+			// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
+			diff := new(big.Int).Sub(finalResult[i], expected)
+			diff.Mod(diff, mod)
+
+			if diff.Cmp(big.NewInt(0)) == 0 {
+				//fmt.Printf("계수 [%d]: PASS\n", i)
+			} else {
+				fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
+				allPassed = false
+				break // 하나라도 실패하면 중단
+			}
+		}
+	}
+
+	if !isVerbose && allPassed {
+		fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
+	} else if !allPassed {
+		fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
+	}
+
+	// 7. 통신 통계 출력
+	fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
+	fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
+	fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
+
+	var avg_time time.Duration
+	for i := 0; i < numParties; i++ {
+		fmt.Printf("party %d time : ", i)
+		fmt.Println(parties[i].LocalTime)
+		avg_time += parties[i].LocalTime
+	}
+	fmt.Printf("avg time : ")
+	fmt.Println(avg_time / time.Duration(numParties))
+
+	fmt.Printf("Total number of triple : %d", TripleCount)
+
+}
+
+func PrintDebugQ0Q1(scheme *SecretSharingScheme, parties []*Party, numParties int, params hefloat.Parameters, mod *big.Int, polres ring.Poly, resultIdx int) {
+	allResultShares := make([][]AdditiveShare, numParties)
+	for i := 0; i < numParties; i++ {
+		allResultShares[i] = parties[i].InputShares[resultIdx]
+	}
+
+	finalResult := scheme.Open(allResultShares)
+
+	// isVerbose: 상세 출력 여부 (true: 전체 출력, false: 패스/실패 여부만 확인)
+	isVerbose := false
+	allPassed := true
+
+	moduli_PQ := params.Q()[:4]
+	//moduli_PQ = append(moduli_PQ, params.P()...)
+	coef := make([]uint64, len(moduli_PQ))
+	polysBigint := make([]*big.Int, params.N())
+	for j := range params.N() {
+		for k := range polres.Coeffs {
+			coef[k] = polres.Coeffs[k][j]
+		}
+		// for k := range polres.P.Coeffs {
+		// 	coef[len(params.Q())+k] = polres.P.Coeffs[k][j]
+		// }
+
+		polysBigint[j], _, _ = crt.CRTUint64(coef, moduli_PQ)
+	}
+
+	fmt.Println("\n--- 결과 검증 ---")
+	for i := 0; i < params.N(); i++ {
+		expected := polysBigint[i]
+
+		if isVerbose {
+			// 상세 출력 모드
+			fmt.Printf("계수 [%d] 연산 결과: %s (기대값: %s)\n", i, finalResult[i].String(), expected)
+
+		} else {
+			// 자동 판별 모드: (Result - Expected) mod M == 0 인지 확인
+			diff := new(big.Int).Sub(finalResult[i], expected)
+			diff.Mod(diff, mod)
+
+			if diff.Cmp(big.NewInt(0)) == 0 {
+				//fmt.Printf("계수 [%d]: PASS\n", i)
+			} else {
+				fmt.Printf("계수 [%d]: FAIL (결과: %s, 기대값: %s)\n", i, finalResult[i].String(), expected.String())
+				allPassed = false
+				break // 하나라도 실패하면 중단
+			}
+		}
+	}
+
+	if !isVerbose && allPassed {
+		fmt.Println("\n결과: 모든 연산이 정확하게 수행되었습니다. (SUCCESS)")
+	} else if !allPassed {
+		fmt.Println("\n결과: 연산 오류가 발견되었습니다. (FAILED)")
+	}
+
+	// 7. 통신 통계 출력
+	fmt.Println("\n--- 통신 통계 (Communication Metrics) ---")
+	fmt.Printf("총 통신 라운드: %d rounds\n", scheme.CommunicationRounds)
+	fmt.Printf("총 통신량: %d bytes\n", scheme.TotalCommBytes)
+
+	var avg_time time.Duration
+	for i := 0; i < numParties; i++ {
+		fmt.Printf("party %d time : ", i)
+		fmt.Println(parties[i].LocalTime)
+		avg_time += parties[i].LocalTime
+	}
+	fmt.Printf("avg time : ")
+	fmt.Println(avg_time / time.Duration(numParties))
+
+	fmt.Printf("Total number of triple : %d", TripleCount)
+
 }

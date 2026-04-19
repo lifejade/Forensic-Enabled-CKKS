@@ -36,7 +36,7 @@ func Test_share() {
 
 	modulus := PQ
 	numParties := 8
-	degree := 65536
+	degree := 65535
 	scheme := NewSecretSharingScheme(modulus, numParties, degree)
 
 	// 2. Party 초기화
