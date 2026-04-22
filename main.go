@@ -965,9 +965,7 @@ func CtRes(pubCTX PublicSideContext, authCTX AuthSideContext, ct *rlwe.Ciphertex
 	return
 }
 
-var TripleCount int
-
-func main() {
+func SKCompare() {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -1047,7 +1045,70 @@ func main() {
 			fmt.Println("max-bit-precision", -math.Log2(maxerr))
 		}
 	}
+}
 
+func CTCompare() {
+	//CPU full power
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	TripleCount = 0
+	modulipath := "moduli.txt"
+	Q, P := LoadModuliFromTXT(modulipath)
+
+	//ckks parameter init
+	SchemeParams := hefloat.ParametersLiteral{
+		LogN:            16,
+		Q:               Q,
+		P:               P,
+		LogDefaultScale: 40,
+	}
+	pubCTX, clientCTX, authCTX := BeginProtocol(SchemeParams)
+	params := pubCTX.params
+	encoder := pubCTX.encoder
+	encryptor := pubCTX.encryptor
+	_ = clientCTX
+
+	for partyNum := 2; partyNum < 3; partyNum++ {
+		fmt.Println("### (t+1) = ", partyNum)
+		values_OriginSK := make([]complex128, params.MaxSlots())
+		var ct *rlwe.Ciphertext
+		{
+			for i := range values_OriginSK {
+				values_OriginSK[i] = sampling.RandComplex128(-1, 1)
+			}
+			pt := hefloat.NewPlaintext(params, params.MaxLevel())
+			encoder.Encode(values_OriginSK, pt)
+			ct, _ = encryptor.EncryptNew(pt)
+		}
+		ptres := CtRes(pubCTX, authCTX, ct, partyNum)
+
+		fmt.Println("값 비교")
+		{
+
+			values_NewSK := make([]complex128, params.MaxSlots())
+			if err := encoder.Decode(ptres, values_NewSK); err != nil {
+				panic(err)
+			}
+
+			maxerr := float64(0)
+			for i := range values_NewSK {
+				err := cmplx.Abs(values_NewSK[i] - values_OriginSK[i])
+				if err > maxerr {
+					maxerr = err
+				}
+			}
+
+			fmt.Println("Compare With Decrypt By Origin SK vs New SK")
+			fmt.Println("max-bit-precision", -math.Log2(maxerr))
+		}
+	}
+}
+
+var TripleCount int
+
+func main() {
+	SKCompare()
+	CTCompare()
 }
 
 // filename 경로에 q, p를 저장합니다
